@@ -2,7 +2,7 @@ package com.gable.templar.zeus.custom
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.gable.templar.constant.JobConstant.{JOB_TYPE, initialTitle}
-import com.gable.templar.custom.view.{DependencyCheckModel, NotebookIdAddParameterRequest, NotebookRunParallelRequest}
+import com.gable.templar.custom.view.{DependencyCheckModel, NotebookCheckParallelRequest, NotebookIdAddParameterRequest, NotebookRunParallelRequest}
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.heaven.util.{HTTPServletRequestUtil, RestTemplateFactoryUtil}
 import com.gable.templar.zeus.controller.model.LoginUser
@@ -49,7 +49,29 @@ trait CustomFw {
     addParameterRequest.put(initialTitle,param)
     notebookIdAddParameterRequest.setNotebookId(notebookId)
     notebookIdAddParameterRequest.setAddParameterMapFromTitle(addParameterRequest)
-    RestTemplateFactoryUtil.getRestTemplar(token).postForObject("/")
+    val response = RestTemplateFactoryUtil.getRestTemplar(token).postForObject("/",notebookIdAddParameterRequest, classOf[util.HashMap[String, JsonNode]])
+    val notebookList = response.get("notebookIdRef")
+    val notebookListSet = new util.ArrayList[String]()
+    val notebookCheckParallelRequest = new NotebookCheckParallelRequest
+    notebookCheckParallelRequest.setRunningId(runId)
+    notebookList.elements().forEachRemaining(n => {
+      notebookListSet.add(n.asText())
+    })
+    val returnResponse: StringBuilder = new StringBuilder()
+    notebookCheckParallelRequest.setNoteRefIds(notebookListSet)
+    var errorCount = 0
+    while(!notebookListSet.isEmpty) {
+      val response = RestTemplateFactoryUtil.getRestTemplar(token).postForObject("/",notebookCheckParallelRequest,classOf[util.HashMap[String,JsonNode]])
+      response.entrySet().forEach(r => {
+        if(!r.getValue.get("status").asText().equals("RUNNING") && !r.getValue.get("status").asText().equals("READY")) {
+          returnResponse.append(f"note name = ${r.getKey} run ${r.getValue.get("status")} url = ${r.getValue.get("url")} result = ${r.getValue.get("message")} ${System.lineSeparator()}")
+          if(!r.getValue.get("status").asText().equals("SUCCESS")) {
+            errorCount += 1
+          }
+          notebookListSet.remove(r.getKey)
+        }
+      })
+    }
   }
 
   def checkOrderDatetimeFormat(patternDate: String): Boolean = {
