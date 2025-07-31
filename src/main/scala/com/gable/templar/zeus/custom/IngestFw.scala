@@ -29,6 +29,7 @@ class IngestFw extends CustomFw {
       val ictrlDtFormat = r.getAs[String]("ictrl_dt_srcfmt")
       val startIctrlDt = dependencyCheckModel.get_bldStartDate().toLocalDateTime.format(DateTimeFormatter.ofPattern(ictrlDtFormat))
       val endIctrlDt = dependencyCheckModel.get_bldEndDate().toLocalDateTime.format(DateTimeFormatter.ofPattern(ictrlDtFormat))
+
     })
   }
 

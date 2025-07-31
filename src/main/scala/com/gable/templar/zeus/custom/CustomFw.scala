@@ -61,6 +61,7 @@ trait CustomFw {
     notebookCheckParallelRequest.setNoteRefIds(notebookListSet)
     var errorCount = 0
     while(!notebookListSet.isEmpty) {
+      Thread.sleep(dependencyCheckModel.getTimeSleep)
       val response = RestTemplateFactoryUtil.getRestTemplar(token).postForObject("/",notebookCheckParallelRequest,classOf[util.HashMap[String,JsonNode]])
       response.entrySet().forEach(r => {
         if(!r.getValue.get("status").asText().equals("RUNNING") && !r.getValue.get("status").asText().equals("READY")) {
@@ -71,6 +72,10 @@ trait CustomFw {
           notebookListSet.remove(r.getKey)
         }
       })
+    }
+    if(errorCount > 0) {
+      returnResponse.append("There is error on some notebook")
+      throw new InvalidArgumentException(returnResponse.toString())
     }
   }
 
