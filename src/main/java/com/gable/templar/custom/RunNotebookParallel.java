@@ -1,31 +1,27 @@
 package com.gable.templar.custom;
 
-import com.gable.templar.constant.JobConstant;
 import com.gable.templar.custom.view.DependencyCheckModel;
 import com.gable.templar.custom.view.ExecuteResponse;
+import com.gable.templar.custom.view.NotebookRunParallelResponse;
+import com.gable.templar.custom.view.RunNotebookParallelResult;
 import com.gable.templar.heaven.exception.InvalidArgumentException;
 import com.gable.templar.heaven.service.custom.DefaultCustomService;
 import com.gable.templar.zeus.SparkServer;
 import com.gable.templar.zeus.config.HeraConfig;
 import com.gable.templar.zeus.controller.model.LoginUser;
-import com.gable.templar.zeus.custom.CustomFw;
 import com.gable.templar.zeus.custom.GeneralService;
 import com.gable.templar.zeus.custom.IngestFw;
 import com.gable.templar.zeus.custom.TransformFw;
-import org.apache.spark.sql.SparkSession;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.task.TaskExecutor;
-import org.springframework.stereotype.Service;
-import org.springframework.web.context.request.RequestContextHolder;
-import org.springframework.web.context.request.ServletRequestAttributes;
 
 import javax.annotation.PostConstruct;
-import javax.servlet.http.HttpServletRequest;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
 
-public class DependencyCheckCustom extends DefaultCustomService<DependencyCheckModel> {
+public class RunNotebookParallel extends DefaultCustomService<DependencyCheckModel> {
+
 
     @Autowired
     private HeraConfig heraConfig;
@@ -54,33 +50,25 @@ public class DependencyCheckCustom extends DefaultCustomService<DependencyCheckM
 
     @Override
     public Object execute(DependencyCheckModel params) throws Exception {
-        SparkSession sparkSession = SparkServer.getZeusSession().session();
-        JobConstant.JOB_TYPE jobType = null;
-        if(params.getTaskGroupName() != null) {
-            jobType = generalService.checkJobTypeFromTaskGroup(
-                    params.getTaskGroupName(),sparkSession,"fwconfz_uat");
-        }
-        else {
-            jobType = generalService.checkJobTypeFromJobName(
-                    params.getJobName(), sparkSession, "fwconfz_uat");
-        }
-        CustomFw customFw = getCustomFwClassByJobType(jobType);
-        return customFw.doRunTaskGroup(params,jobType);
-    }
-
-    public CustomFw getCustomFwClassByJobType(JobConstant.JOB_TYPE jobType) {
-        switch (jobType) {
-            case OUTBOUND:
-            case TRANSFORM: {
-                return transformFw;
-            }
-            case INGEST_API:
-            case KAFKA:
-            case FILE:
-            case INGEST_DB: {
-                return ingestFw;
-            }
-        }
+//        String runId = "";
+//        if(params.get_workflowId() != null) {
+//            runId = params.get_workflowId() + "||" + params.get_runId() + "||" + params.get_taskId();
+//        }
+//        else {
+//            runId = "manual_run_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HH_mm_ss"));
+//        }
+//
+//        RunNotebookParallelResult runNotebookParallelResult =
+//                ingestFw.doRunNotebookParallel(new HashMap<>(),
+//                        params.getNotebookId(),params,loginUser,runId,);
+//        if(runNotebookParallelResult.getErrorMsg() != null) {
+//            throw new InvalidArgumentException(runNotebookParallelResult.getErrorMsg());
+//        }
+//        else {
+//            ExecuteResponse executeResponse = new ExecuteResponse();
+//            executeResponse.setMessage(runNotebookParallelResult.getMessage());
+//            return executeResponse;
+//        }
         return null;
     }
 

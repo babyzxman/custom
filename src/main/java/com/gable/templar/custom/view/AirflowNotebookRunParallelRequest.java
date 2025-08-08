@@ -6,11 +6,11 @@ import java.util.List;
 
 public class AirflowNotebookRunParallelRequest {
 
-    private Integer concurrentParallel;
+    private Integer concurrentParallel = 1;
 
     private int timeSleep = 10;
 
-    private Integer timeout;
+    private Integer timeout = 86400;
 
     private String language;
 

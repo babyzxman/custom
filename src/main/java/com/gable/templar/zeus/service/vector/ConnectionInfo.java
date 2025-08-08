@@ -4,6 +4,8 @@ public class ConnectionInfo {
 
     private String ip;
 
+    private String sid;
+
     private String port;
 
     private String dbName;
@@ -60,5 +62,13 @@ public class ConnectionInfo {
 
     public void setDbType(String dbType) {
         this.dbType = dbType;
+    }
+
+    public String getSid() {
+        return sid;
+    }
+
+    public void setSid(String sid) {
+        this.sid = sid;
     }
 }

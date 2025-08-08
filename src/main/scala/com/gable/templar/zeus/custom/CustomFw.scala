@@ -1,81 +1,321 @@
 package com.gable.templar.zeus.custom
 
-import com.fasterxml.jackson.databind.JsonNode
-import com.gable.templar.constant.JobConstant.{JOB_TYPE, initialTitle}
-import com.gable.templar.custom.view.{DependencyCheckModel, NotebookCheckParallelRequest, NotebookIdAddParameterRequest, NotebookRunParallelRequest}
+import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
+import com.gable.templar.constant.JobConstant
+import com.gable.templar.constant.JobConstant.{JOB_TYPE, initialTitle, manualTitle}
+import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse, NotebookCheckParallelRequest, NotebookIdAddParameterRequest, NotebookRunParallelRequest, NotebookRunParallelResponse, RunNotebookParallelResult}
+import com.gable.templar.exception.DropDuplicatesJobError
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.heaven.util.{HTTPServletRequestUtil, RestTemplateFactoryUtil}
 import com.gable.templar.zeus.controller.model.LoginUser
+import com.gable.templar.zeus.service.vector.ConnectionInfo
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.slf4j.{Logger, LoggerFactory}
+import org.springframework.core.task.TaskExecutor
 import org.springframework.web.context.request.{RequestContextHolder, ServletRequestAttributes}
 
-import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
+import java.sql.{DriverManager, Timestamp}
+import java.time.{Duration, LocalDate, LocalDateTime}
+import java.time.format.{DateTimeFormatter, DateTimeParseException}
 import java.time.temporal.ChronoUnit
 import java.util
-import java.util.Map
+import java.util.concurrent.{CompletableFuture, Future}
+import javax.servlet.http.HttpServletRequest
+import scala.collection.mutable.ArrayBuffer
 import scala.util.{Failure, Success, Try}
 
 trait CustomFw {
 
-  var schemaName = ""
+  val salt = "rTYlPkZH37QOf7Xx1GzZ0hakdl/2/Z02HlPesDfQ2lM="
 
-  def doRunFramework(dependencyCheckModel: DependencyCheckModel,
-                     JOB_TYPE: JOB_TYPE,sparkSession: SparkSession,loginUser: LoginUser): Unit
+  val ultKey = "AdKX67Zn0JRJSGJQ7/4LrQOsZ0IW8+Fcdh7hpeJV8GeVNiPIs4i0RZ4T+XjXyEb0"
 
-  def checkDependencyByJobName(dependencyCheckModel: DependencyCheckModel,sparkSession: SparkSession): java.util.Map[String,Boolean]
+  private val logger = LoggerFactory.getLogger(classOf[CustomFw])
 
-  def setSchemaName(schemaName:String): Unit = {
-    this.schemaName = schemaName
-  }
 
-  def doRunNotebookParallel(param: util.HashMap[String,JsonNode], notebookId: String,dependencyCheckModel: DependencyCheckModel,loginUser: LoginUser): Unit = {
-    var runId: String = null
-    if(dependencyCheckModel.get_workflowId() != null) {
-      runId = dependencyCheckModel.get_workflowId() + "||" + dependencyCheckModel.get_runId() + "||" + dependencyCheckModel.get_taskId()
+  val taskExecutor: TaskExecutor
+
+  val schemaName = ""
+
+  val sparkSession: SparkSession
+
+  val HOURS_CHECK_ROUND_TIME = 3
+
+
+  var tmpzSchema: String = {
+    if(schemaName.endsWith("_uat")) {
+      "tmpz_uat"
     }
     else {
-      runId = "manual_run_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HH_mm_ss"))
+      "tmpz"
     }
-    val attrs = RequestContextHolder.getRequestAttributes.asInstanceOf[ServletRequestAttributes]
-    val token = HTTPServletRequestUtil.getToken(attrs.getRequest)
+  }
+
+  val heraUrl: String = ""
+
+  val loginUser: LoginUser
+
+  val objectMapper: ObjectMapper = new ObjectMapper()
+
+  val scalaObjectMapper: ObjectMapper = new ObjectMapper()
+
+  scalaObjectMapper.registerModule(DefaultScalaModule)
+
+  def doRunFramework(dependencyCheckModel: DependencyCheckModel,
+                     JOB_TYPE: JOB_TYPE,jobName: String,controlJobDf: Row,
+                     tblConfName: String,httpServletRequest: HttpServletRequest,
+                     username: String): CompletableFuture[ExecuteResponse]
+
+  def checkDependencyByJobName(controlJobDf: Row,
+                               masterRefDate: LocalDateTime,connectionInfo: ConnectionInfo,
+                               refDateIctrlDt: String, startICtrlDt: String,
+                               postgresConnectionInfo: ConnectionInfo,jobName: String): java.util.Map[String,Boolean]
+
+  def parseToLocalDateTime(input: String,format: String): Option[LocalDateTime] = {
+    try {
+      Some(LocalDateTime.parse(input, DateTimeFormatter.ofPattern(format)))
+    } catch {
+      case _: DateTimeParseException =>
+        try {
+          try {
+            // Try parsing as LocalDate, then convert
+            val date = LocalDate.parse(input, DateTimeFormatter.ofPattern(format))
+            Some(date.atStartOfDay())
+          } catch {
+            case _: DateTimeParseException => None
+          }
+        }
+    }
+  }
+
+  def getTblConfNameByJobType(jobType: JOB_TYPE): String = {
+    jobType match {
+      case JOB_TYPE.FILE => {
+        JobConstant.tableNmApiIngestion
+      }
+      case JOB_TYPE.KAFKA => {
+        JobConstant.tableNmKafkaIngestion
+      }
+      case JOB_TYPE.TRANSFORM => {
+        JobConstant.tableNmTrans
+      }
+      case JOB_TYPE.INGEST_DB => {
+        JobConstant.tableNmDbIngestion
+      }
+      case JOB_TYPE.INGEST_API => {
+        JobConstant.tableNmApiIngestion
+      }
+      case JOB_TYPE.OUTBOUND => {
+        JobConstant.tableNmOutBound
+      }
+    }
+  }
+
+
+  def doRunTaskGroup(dependencyCheckModel: DependencyCheckModel,jobType: JOB_TYPE): util.ArrayList[ExecuteResponse] = {
+    val tblConfName = getTblConfNameByJobType(jobType)
+    val httpServletRequest = RequestContextHolder.getRequestAttributes.asInstanceOf[ServletRequestAttributes].getRequest
+    if(dependencyCheckModel.getTaskGroupName != null && dependencyCheckModel.getJobName == null) {
+      val executeResult = new util.ArrayList[ExecuteResponse]()
+      val query = f"""select *
+                     |from ${schemaName}.$tblConfName
+                     |where lower(tasksgroup_nm) = lower('${dependencyCheckModel.getTaskGroupName}') and lower(active_flag) = lower('Y')""".stripMargin
+      val taskGroupDf = sparkSession.sql(query).collect()
+      val completableFutureList = ArrayBuffer[CompletableFuture[ExecuteResponse]]()
+      taskGroupDf.foreach(r => {
+        val executeResponse = new ExecuteResponse
+        executeResponse.setJobName(r.getAs[String]("job_nm"))
+        completableFutureList += doRunFramework(dependencyCheckModel,
+          jobType,r.getAs[String]("job_nm"),r,tblConfName,httpServletRequest,loginUser.getUsername)
+        executeResult.add(executeResponse)
+      })
+      val allOf = CompletableFuture.allOf(completableFutureList: _*)
+      allOf.join()
+      for(completableFuture <- completableFutureList) {
+        executeResult.add(completableFuture.get())
+      }
+      executeResult
+    }
+    else {
+      val executeResult = new util.ArrayList[ExecuteResponse]()
+      val query =
+        f"""select * from $schemaName.$tblConfName where lower(job_nm) = lower('${dependencyCheckModel.getJobName}')
+           | and lower(active_flag) = lower('Y')
+           |""".stripMargin
+      val jobDf = sparkSession.sql(query)
+      val row = jobDf.collect()(0)
+      executeResult.add(CompletableFuture.completedFuture(
+        doRunFramework(dependencyCheckModel,jobType,
+        row.getAs[String]("job_nm"),row,tblConfName,
+          httpServletRequest,loginUser.getUsername)).get().get())
+      executeResult
+    }
+  }
+
+  def updateStateOfAuditLogByJobNameAndRoundTimeAndDagRun(status: String, dependencyCheckModel: DependencyCheckModel,
+                                                          runId: String, jobEndTime:LocalDateTime,
+                                                          roundTime: LocalDateTime, connectionInfo: ConnectionInfo,
+                                                          errorMsg: String,tableNm: String): Unit = {
+    val params = Seq(status,jobEndTime,errorMsg,dependencyCheckModel.getJobName,runId,roundTime)
+    val sql = f"update ${this.schemaName}.$tableNm set status = ?, " +
+      f"job_end_time = ?,  err_msg = ? where " +
+      f"job_nm = ? and dag_run_id = ? and round_time = ?"
+    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
+      connectionInfo.getUserNm,connectionInfo.getPassword,sql,params)
+  }
+
+  def postProcess(status: String,
+                  dependencyCheckModel: DependencyCheckModel,
+                  errorMsg: String,
+                  runId: String, sparkSession: SparkSession, logUrl: String,
+                  jobStartTime: LocalDateTime, jobEndTime: LocalDateTime,
+                  refDate: LocalDateTime,connectionInfo: ConnectionInfo,
+                  ictrlDt: String,jobName: String,tblLogName: String,
+                  tblConfName:String): Unit = {
+    val duration = Duration.between(jobStartTime,jobEndTime)
+    val rowCount = sparkSession.table(f"$tmpzSchema.${jobName}_tmp_validation").count()
+    val hours = duration.toHours
+    val minutes = duration.minusHours(hours).toMinutes
+    val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
+    val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
+    val params = Seq(status,errorMsg,rowCount,logUrl,
+      durationString,jobName,runId,refDate)
+    val sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
+      f"err_msg = ?, row_cnt = ?, log_url = ?, duration = ? " +
+      f"where job_nm = ? and dag_run_id = ? " +
+      f"and round_time = ?"
+    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
+      connectionInfo.getUserNm,connectionInfo.getPassword,sql,params)
+    if(status.equals("SUCCESS"))
+      sparkSession.sql(s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
+        s"where job_nm = '${jobName}'")
+  }
+
+
+
+  def doRunNotebookParallel(param: java.util.HashMap[String,JsonNode], notebookId: String,
+                            dependencyCheckModel: DependencyCheckModel,username: String,
+                            runId: String,httpServletRequest: HttpServletRequest): RunNotebookParallelResult = {
+    val runNotebookParallelResult = new RunNotebookParallelResult
+    param.put("dag_run_id",objectMapper.valueToTree(runId))
+    val token = HTTPServletRequestUtil.getToken(httpServletRequest)
     val notebookRunParallelRequest = new NotebookRunParallelRequest
-    notebookRunParallelRequest.setRunBy(loginUser.getUsername)
+    notebookRunParallelRequest.setRunBy(username)
     notebookRunParallelRequest.setAsync(true)
     notebookRunParallelRequest.setRunningId(runId)
     notebookRunParallelRequest.setLanguage("python")
+    notebookRunParallelRequest.setModuleNotebookName(dependencyCheckModel.getModuleNotebookName)
     val notebookIdAddParameterRequest: NotebookIdAddParameterRequest = new NotebookIdAddParameterRequest
-    val addParameterRequest: util.Map[String, util.Map[String, JsonNode]] = new util.HashMap[String,util.Map[String,JsonNode]]()
+    val addParameterRequest: java.util.Map[String, java.util.Map[String, JsonNode]] = new java.util.HashMap[String,java.util.Map[String,JsonNode]]()
     addParameterRequest.put(initialTitle,param)
+    addParameterRequest.put(manualTitle,param)
     notebookIdAddParameterRequest.setNotebookId(notebookId)
     notebookIdAddParameterRequest.setAddParameterMapFromTitle(addParameterRequest)
-    val response = RestTemplateFactoryUtil.getRestTemplar(token).postForObject("/",notebookIdAddParameterRequest, classOf[util.HashMap[String, JsonNode]])
-    val notebookList = response.get("notebookIdRef")
-    val notebookListSet = new util.ArrayList[String]()
+    val notebookIdAddParameterRequestList: java.util.ArrayList[NotebookIdAddParameterRequest] = new util.ArrayList[NotebookIdAddParameterRequest]()
+    notebookIdAddParameterRequestList.add(notebookIdAddParameterRequest)
+    notebookRunParallelRequest.setNotebookAddParameterRequest(notebookIdAddParameterRequestList)
+    logger.info(f"request  = ${objectMapper.writeValueAsString(notebookRunParallelRequest)}")
+    val response = RestTemplateFactoryUtil.getRestTemplar(token,true).postForObject(f"$heraUrl/private/notebook/start/session/parallel",notebookRunParallelRequest, classOf[NotebookRunParallelResponse])
+    val notebookList =  response.getNotebookRefIds
+    logger.info(f"request parallel result = ${response}")
     val notebookCheckParallelRequest = new NotebookCheckParallelRequest
     notebookCheckParallelRequest.setRunningId(runId)
-    notebookList.elements().forEachRemaining(n => {
-      notebookListSet.add(n.asText())
-    })
     val returnResponse: StringBuilder = new StringBuilder()
-    notebookCheckParallelRequest.setNoteRefIds(notebookListSet)
+    notebookCheckParallelRequest.setNoteRefIds(notebookList)
     var errorCount = 0
-    while(!notebookListSet.isEmpty) {
-      Thread.sleep(dependencyCheckModel.getTimeSleep)
-      val response = RestTemplateFactoryUtil.getRestTemplar(token).postForObject("/",notebookCheckParallelRequest,classOf[util.HashMap[String,JsonNode]])
+    var notebookUrl = ""
+    var timeSleep: Long = 0L
+    if(dependencyCheckModel.getTimeSleep == null) {
+      timeSleep = 15L
+    }
+    else {
+      timeSleep = dependencyCheckModel.getTimeSleep
+    }
+    while(!notebookList.isEmpty) {
+      Thread.sleep(timeSleep*1000)
+      val response = RestTemplateFactoryUtil.getRestTemplar(token,true).postForObject(f"$heraUrl/private/notebook/session/parallel/check",notebookCheckParallelRequest,classOf[java.util.HashMap[String,java.util.HashMap[String,String]]])
       response.entrySet().forEach(r => {
-        if(!r.getValue.get("status").asText().equals("RUNNING") && !r.getValue.get("status").asText().equals("READY")) {
+        logger.info("r value = {}",r.getValue)
+        if(!r.getValue.get("status").equals("RUNNING") && !r.getValue.get("status").equals("READY")) {
           returnResponse.append(f"note name = ${r.getKey} run ${r.getValue.get("status")} url = ${r.getValue.get("url")} result = ${r.getValue.get("message")} ${System.lineSeparator()}")
-          if(!r.getValue.get("status").asText().equals("SUCCESS")) {
+          if(!r.getValue.get("status").equals("SUCCESS")) {
             errorCount += 1
           }
-          notebookListSet.remove(r.getKey)
+          if(r.getValue.get("url") != null){
+            notebookUrl = r.getValue.get("url")
+          }
+          notebookList.remove(r.getValue.get("notebookIdRef"))
         }
       })
     }
     if(errorCount > 0) {
       returnResponse.append("There is error on some notebook")
-      throw new InvalidArgumentException(returnResponse.toString())
+      runNotebookParallelResult.setErrorMsg(returnResponse.toString())
+      runNotebookParallelResult.setErrorSpecificMsg(f"There is error on some notebook url = $notebookUrl")
+    }
+    runNotebookParallelResult.setNotebookUrl(notebookUrl)
+    runNotebookParallelResult.setMessage(returnResponse.toString())
+    runNotebookParallelResult
+  }
+
+  def calOverLap(dateIn: LocalDateTime, valueOverlap: Any, frequency: String): LocalDateTime = {
+    var freq = frequency
+    if (freq == null || freq.isEmpty) {
+      freq = "daily"
+    }
+    freq = freq.toLowerCase()
+
+    if (valueOverlap == null || valueOverlap.toString.isEmpty) {
+      return dateIn
+    }
+
+    val value_overlap_int: Int = valueOverlap match {
+      case i: Int => i
+      case s: String =>
+        if (s.matches("\\d+")) s.toInt
+        else {
+          println(s"Has Wrong with back_date $valueOverlap")
+          throw new Exception("Invalid value_overlap")
+        }
+      case _ =>
+        println(s"Has Wrong with back_date $valueOverlap")
+        throw new Exception("Invalid value_overlap")
+    }
+
+    if (freq.endsWith("m") && freq != "monthly") {
+      val freqParts = freq.split("m")
+      val value_in = freqParts(0).trim()
+      val value_in_int =
+        if (value_in.matches("\\d+")) value_in.toInt
+        else {
+          println(s"Has Someting Wrong with frequency $freq")
+          throw new Exception("Invalid frequency")
+        }
+      return dateIn.minus(value_in_int.toLong * value_overlap_int, ChronoUnit.MINUTES)
+    } else if (freq.endsWith("h")) {
+      val freqParts = freq.split("h")
+      val value_in = freqParts(0).trim()
+      val value_in_int =
+        if (value_in.matches("\\d+")) value_in.toInt
+        else {
+          println(s"Has Someting Wrong with frequency $freq")
+          throw new Exception("Invalid frequency")
+        }
+      return dateIn.minus(value_in_int.toLong * value_overlap_int, ChronoUnit.HOURS)
+    } else {
+      freq match {
+        case "hourly" => dateIn.minus(value_overlap_int.toLong, ChronoUnit.HOURS)
+        case "daily" => dateIn.minus(value_overlap_int.toLong, ChronoUnit.DAYS)
+        case "weekly" => dateIn.minus(value_overlap_int.toLong * 7, ChronoUnit.DAYS)
+        case "monthly" => dateIn.minus(value_overlap_int.toLong, ChronoUnit.MONTHS)
+        case "quarterly" => dateIn.minus(value_overlap_int.toLong * 3, ChronoUnit.MONTHS)
+        case "yearly" => dateIn.minus(value_overlap_int.toLong, ChronoUnit.YEARS)
+        case _ =>
+          val errMsg = s"do not know how this frequency work $freq"
+          println(errMsg)
+          throw new Exception(errMsg)
+      }
     }
   }
 
@@ -280,44 +520,6 @@ trait CustomFw {
       val errMsg = s"Do not know how this frequency work: $frequency"
       println(errMsg)
       throw new InvalidArgumentException(errMsg)
-    }
-  }
-
-  def postgresqlQueryFunc(
-                           server: String,
-                           port: String, // Include port in function signature as per Python, use in URL
-                           dbName: String, // Renamed from db_name for Scala convention
-                           username: String,
-                           password: String,
-                           query: String,
-                           sparkSession: SparkSession
-                         ): DataFrame = {
-    println(s"Query : $query")
-    try {
-      val jdbcUrl = s"jdbc:postgresql://$server:$port/$dbName" // Including port for standard JDBC URL
-      val spdf = sparkSession.read.format("jdbc") // Use GlobalConfig.spark if integrating
-        .option("url", jdbcUrl)
-        .option("query", query) // "query" option is used for arbitrary SQL queries
-        .option("user", username)
-        .option("password", password)
-        .option("driver", "org.postgresql.Driver")
-        // These options are PostgreSQL JDBC driver specific for SSL/TLS connections
-        // and are correctly applied in Scala as well.
-        .option("encrypt", "true") // Note: Some drivers might use `ssl` instead of `encrypt`
-        .option("trustServerCertificate", "true") // Note: Some drivers might use `sslmode=require` or similar.
-        // "trustServerCertificate" is more common with SQL Server JDBC.
-        // For PostgreSQL, `sslmode=verify-full` or `sslmode=require` are typical.
-        // Double-check your PostgreSQL driver's SSL options.
-        .load()
-
-      println("Complete Query")
-      spdf
-    } catch {
-      case e: Exception =>
-        // Original Python printed partial error message and then re-raised.
-        // Scala can directly re-throw the custom exception with the original cause.
-        println(s"An error occurred during PostgreSQL query: ${e.getMessage}")
-        throw new Exception(e) // Pass the original exception as the cause
     }
   }
 

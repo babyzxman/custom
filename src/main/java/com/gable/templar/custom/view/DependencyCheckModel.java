@@ -22,9 +22,13 @@ public class DependencyCheckModel {
 
     private String runType;
 
-    private Long timeout;
+    private Long timeout = 86400L;
 
-    private Long timeSleep;
+    private Long timeSleep = 10L;
+
+    private String moduleNotebookName;
+
+    private String notebookId;
 
     public String getRunType() {
         return runType;
@@ -112,5 +116,21 @@ public class DependencyCheckModel {
 
     public void set_bldEndDate(Timestamp _bldEndDate) {
         this._bldEndDate = _bldEndDate;
+    }
+
+    public String getModuleNotebookName() {
+        return moduleNotebookName;
+    }
+
+    public void setModuleNotebookName(String moduleNotebookName) {
+        this.moduleNotebookName = moduleNotebookName;
+    }
+
+    public String getNotebookId() {
+        return notebookId;
+    }
+
+    public void setNotebookId(String notebookId) {
+        this.notebookId = notebookId;
     }
 }

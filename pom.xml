@@ -12,9 +12,9 @@
     <properties>
         <java.version>1.8</java.version>
         <spring.scope>compile</spring.scope>
-        <heaven.version>2.3.0</heaven.version>
+        <heaven.version>4.6.0</heaven.version>
         <zeus.version>4.6.7</zeus.version>
-        <spark.version>3.2.2</spark.version>
+        <spark.version>3.5.3</spark.version>
         <spark.scala.version>2.12</spark.scala.version>
         <spark.lib.scope>provided</spark.lib.scope>
         <lib.scope>provided</lib.scope>
