@@ -3,6 +3,7 @@ package com.gable.templar.custom;
 import com.gable.templar.constant.JobConstant;
 import com.gable.templar.custom.view.DependencyCheckModel;
 import com.gable.templar.custom.view.ExecuteResponse;
+import com.gable.templar.custom.view.ExecuteResponseWrap;
 import com.gable.templar.heaven.exception.InvalidArgumentException;
 import com.gable.templar.heaven.service.custom.DefaultCustomService;
 import com.gable.templar.zeus.SparkServer;
@@ -61,7 +62,9 @@ public class DependencyCheckCustomProd extends DefaultCustomService<DependencyCh
                     params.getJobName(), sparkSession, "fwconfz");
         }
         CustomFw customFw = getCustomFwClassByJobType(jobType);
-        return customFw.doRunTaskGroup(params,jobType);
+        ExecuteResponseWrap executeResponseWrap = new ExecuteResponseWrap();
+        executeResponseWrap.setExecuteResponseList(customFw.doRunTaskGroup(params,jobType));
+        return executeResponseWrap;
     }
 
     @Override

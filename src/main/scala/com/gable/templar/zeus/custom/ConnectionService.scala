@@ -1,56 +1,77 @@
 package com.gable.templar.zeus.custom
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.zeus.SparkServer
 import com.gable.templar.zeus.service.vector.ConnectionInfo
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.slf4j.LoggerFactory
 
-import java.sql.DriverManager
+import java.sql.{Connection, DriverManager, PreparedStatement, ResultSet}
 
 object ConnectionService {
 
   private val logger = LoggerFactory.getLogger(this.getClass)
 
+  private val objectMapper: ObjectMapper = new ObjectMapper()
 
-
-  def postgresqlQueryFunc(
-                           server: String,
-                           port: String, // Include port in function signature as per Python, use in URL
-                           dbName: String, // Renamed from db_name for Scala convention
-                           username: String,
-                           password: String,
-                           query: String,
-                           sparkSession: SparkSession
-                         ): DataFrame = {
-    println(s"Query : $query")
-    try {
-      val jdbcUrl = s"jdbc:postgresql://$server:$port/$dbName" // Including port for standard JDBC URL
-      val spdf = sparkSession.read.format("jdbc") // Use GlobalConfig.spark if integrating
-        .option("url", jdbcUrl)
-        .option("query", query) // "query" option is used for arbitrary SQL queries
-        .option("user", username)
-        .option("password", password)
-        .option("driver", "org.postgresql.Driver")
-        // These options are PostgreSQL JDBC driver specific for SSL/TLS connections
-        // and are correctly applied in Scala as well.
-        .option("encrypt", "true") // Note: Some drivers might use `ssl` instead of `encrypt`
-        .option("trustServerCertificate", "true") // Note: Some drivers might use `sslmode=require` or similar.
-        // "trustServerCertificate" is more common with SQL Server JDBC.
-        // For PostgreSQL, `sslmode=verify-full` or `sslmode=require` are typical.
-        // Double-check your PostgreSQL driver's SSL options.
-        .load()
-
-      println("Complete Query")
-      spdf
-    } catch {
-      case e: Exception =>
-        // Original Python printed partial error message and then re-raised.
-        // Scala can directly re-throw the custom exception with the original cause.
-        println(s"An error occurred during PostgreSQL query: ${e.getMessage}")
-        throw new Exception(e) // Pass the original exception as the cause
+  final case class QueryHandle(conn: Connection, stmt: PreparedStatement, rs: ResultSet) extends AutoCloseable {
+    override def close(): Unit = {
+      try rs.close() finally try stmt.close() finally conn.close()
     }
   }
+
+  def postgresqlQueryDirectly(server: String,
+                              port: String, // Include port in function signature as per Python, use in URL
+                              dbName: String, // Renamed from db_name for Scala convention
+                              username: String,
+                              password: String,
+                              query: String): QueryHandle = {
+    val url = s"jdbc:postgresql://$server:$port/$dbName"
+    logger.info("Executing query: {}", query)
+
+    val connection = DriverManager.getConnection(url, username, password)
+    val statement = connection.prepareStatement(query)
+    QueryHandle(connection, statement, statement.executeQuery())
+  }
+
+//  def postgresqlQueryFunc(
+//                           server: String,
+//                           port: String, // Include port in function signature as per Python, use in URL
+//                           dbName: String, // Renamed from db_name for Scala convention
+//                           username: String,
+//                           password: String,
+//                           query: String,
+//                           sparkSession: SparkSession
+//                         ): DataFrame = {
+//    println(s"Query : $query")
+//    try {
+//      val jdbcUrl = s"jdbc:postgresql://$server:$port/$dbName" // Including port for standard JDBC URL
+//      val spdf = sparkSession.read.format("jdbc") // Use GlobalConfig.spark if integrating
+//        .option("url", jdbcUrl)
+//        .option("query", query) // "query" option is used for arbitrary SQL queries
+//        .option("user", username)
+//        .option("password", password)
+//        .option("driver", "org.postgresql.Driver")
+//        // These options are PostgreSQL JDBC driver specific for SSL/TLS connections
+//        // and are correctly applied in Scala as well.
+//        .option("encrypt", "true") // Note: Some drivers might use `ssl` instead of `encrypt`
+//        .option("trustServerCertificate", "true") // Note: Some drivers might use `sslmode=require` or similar.
+//        // "trustServerCertificate" is more common with SQL Server JDBC.
+//        // For PostgreSQL, `sslmode=verify-full` or `sslmode=require` are typical.
+//        // Double-check your PostgreSQL driver's SSL options.
+//        .load()
+//
+//      println("Complete Query")
+//      spdf
+//    } catch {
+//      case e: Exception =>
+//        // Original Python printed partial error message and then re-raised.
+//        // Scala can directly re-throw the custom exception with the original cause.
+//        println(s"An error occurred during PostgreSQL query: ${e.getMessage}")
+//        throw new Exception(e) // Pass the original exception as the cause
+//    }
+//  }
 
 
   def postgresqlInsertUpdateFunc(
@@ -115,11 +136,7 @@ object ConnectionService {
       .toMap // Convert to a Map for easy lookup
 
     def getValue(key: String): String = {
-      configMap.getOrElse(key, {
-        val errMsg = s"Configuration key '$key' not found in master config."
-        println(errMsg)
-        throw new InvalidArgumentException(errMsg)
-      })
+      configMap.getOrElse(key, null)
     }
 
     val connectionInfo = new ConnectionInfo
@@ -128,7 +145,9 @@ object ConnectionService {
     connectionInfo.setPort(getValue("port"))
     connectionInfo.setDbName(getValue("db_name"))
     connectionInfo.setUserNm(getValue("user_nm"))
-    connectionInfo.setPassword("K3Z0bHMnHhE6HeinZ3uXda6y1TRJEN")
+    var password = EncryptDecrypt.decrypt(getValue("password"))
+    password = objectMapper.readTree(password).get("value").asText()
+    connectionInfo.setPassword(password)
     connectionInfo.setDbType(getValue("db_type"))
 
     println("Query Complete")

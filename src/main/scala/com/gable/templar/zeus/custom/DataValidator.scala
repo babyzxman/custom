@@ -104,18 +104,19 @@ object DataValidator {
         FROM public.datasource_profile
         WHERE LOWER(name) = LOWER('$targetTableNm')
       """
-      val dfResult = ConnectionService.postgresqlQueryFunc(
+      val result = ConnectionService.postgresqlQueryDirectly(
         connectionInfo.getIp, connectionInfo.getPort, "hera",
-        connectionInfo.getUserNm,connectionInfo.getPassword, queryTableType,spark)
-      val result = dfResult.collect()
-
-      if (result.length != 1) {
-        throw new InvalidArgumentException("Query Type Table has more than one record or Table not found")
-      } else {
-        val tableType = result.head.getString(1)
-        println(s"Table $targetTableNm is $tableType")
-        tableType
+        connectionInfo.getUserNm,connectionInfo.getPassword, queryTableType)
+      try {
+        while (result.rs.next()) {
+          val tableType = result.rs.getString("source_type")
+          return tableType
+        }
       }
+      finally{
+        result.close()
+      }
+      throw new InvalidArgumentException("This target table doesn't exists in hera")
     }
 
     // Rewrite of `upsert_condition`

@@ -55,6 +55,10 @@ class TransformFw(override val schemaName: String,
         var currentLocalDateRun: LocalDateTime = null
         val catchUpType = controlJobDf.getAs[String]("catchup_type")
         var ictrlDtTgtFmt = controlJobDf.getAs[String]("ictrl_dt_tgtfmt")
+        val schemaNameFromTbl =  controlJobDf.getAs[String]("schema_nm")
+        val tableName = controlJobDf.getAs[String]("table_nm")
+        val loadType = controlJobDf.getAs[String]("load_type")
+        val taskGroupName = controlJobDf.getAs[String]("tasksgroup_nm")
         if(ictrlDtTgtFmt == null) {
           ictrlDtTgtFmt = "%Y%m%d"
         }
@@ -113,14 +117,15 @@ class TransformFw(override val schemaName: String,
             val refDateIctrlDt = ictrlDtRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
             val runTime: LocalDateTime = LocalDateTime.now()
             insertRoundAuditLog(dependencyCheckModel,
-              controlJobDf.getAs[String]("schema_nm"), controlJobDf.getAs[String]("table_nm"),
+              schemaNameFromTbl, tableName,
               runId, refDateIctrlDt, connectionInfo, runTime,
-              startIctrlDt, endIctrlDt, roundTime, jobName,controlJobDf.getAs[String]("load_type"),
-              controlJobDf.getAs[String]("tasksgroup_nm"))
+              startIctrlDt, endIctrlDt, roundTime, jobName,loadType,
+              taskGroupName)
             try {
               //          checkRunningIctrlDt(
               //            dependencyCheckModel.getJobName,catchUpType, dateFormatIctrlDtForTb,
               //            frequency,startRun,masterRefDate,connectionInfo,runId,roundTime)
+              var startDetailTime = LocalDateTime.now()
               breakable {
                 for (i <- 0 to totalRetry) {
                   val results: java.util.Map[String, Boolean] = checkDependencyByJobName(
@@ -146,6 +151,14 @@ class TransformFw(override val schemaName: String,
                   Thread.sleep(timeRetry * 1000)
                 }
               }
+              var stepRun = "FW CHECK PREREQUISITE"
+              var stepSeq = "FW:2"
+              var stepRunNext = "FW RUN SCRIPTS TRANSFORMATION"
+              var stepSeqNext = "FW:3"
+              insertAuditLogDetail(stepRun,stepSeq,jobName,runId,taskGroupName,schemaNameFromTbl,
+                tableName,loadType,roundTime,startDetailTime,"SUCCESS",refDateIctrlDt,
+                stepRunNext,stepSeqNext,connectionInfo)
+              startDetailTime = LocalDateTime.now()
               val param: java.util.HashMap[String, JsonNode] = new util.HashMap[String, JsonNode]()
               val specArg: util.ArrayList[String] = new util.ArrayList[String]
               specArg.add(refDateIctrlDt)
@@ -202,6 +215,14 @@ class TransformFw(override val schemaName: String,
               }
               val partitionCol: List[String] = scalaObjectMapper.readValue(
                 controlJobDf.getAs[String]("partition_column").replace("'", "\""), classOf[List[String]])
+              stepRun = "FW RUN SCRIPTS TRANSFORMATION"
+              stepSeq = "FW:3"
+              stepRunNext = "FW VALIDATION PROCESS"
+              stepSeqNext = "FW:4"
+              insertAuditLogDetail(stepRun,stepSeq,jobName,runId,taskGroupName,schemaNameFromTbl,
+                tableName,loadType,roundTime,startDetailTime,"SUCCESS",refDateIctrlDt,
+                stepRunNext,stepSeqNext,connectionInfo)
+              startDetailTime = LocalDateTime.now()
               DataValidator.insertToTargetMode(controlJobDf.getAs[String]("schema_nm"),
                 controlJobDf.getAs[String]("table_nm"), "tmp_validation",
                 controlJobDf.getAs[String]("load_type"), partitionCol, controlJobDf.
@@ -211,6 +232,13 @@ class TransformFw(override val schemaName: String,
                 runId, sparkSession, runNotebookParallelResult.getNotebookUrl, runTime,
                 LocalDateTime.now(), roundTime, connectionInfo, refDateIctrlDt, jobName,
                 "tbl_trans_audit_logs", tblConfName)
+              stepRun = "FW VALIDATION PROCESS"
+              stepSeq = "FW:4"
+              stepRunNext = null
+              stepSeqNext = null
+              insertAuditLogDetail(stepRun,stepSeq,jobName,runId,taskGroupName,schemaNameFromTbl,
+                tableName,loadType,roundTime,startDetailTime,"SUCCESS",refDateIctrlDt,
+                stepRunNext,stepSeqNext,connectionInfo)
               sb.append(runNotebookParallelResult.getMessage)
               if (catchUpType.equalsIgnoreCase(CATCHUP_TYPE.SEQUENCE.getValue)) {
                 currentLocalDateRun = addDateByFrequency(currentLocalDateRun, frequency)
@@ -291,12 +319,16 @@ class TransformFw(override val schemaName: String,
     ORDER BY round_time DESC
     LIMIT 1
     """
-    val dfResultLog = ConnectionService.postgresqlQueryFunc(connectionInfo.getIp, connectionInfo.getPort,
+    val dfResultLog = ConnectionService.postgresqlQueryDirectly(connectionInfo.getIp, connectionInfo.getPort,
       connectionInfo.getDbName, connectionInfo.getUserNm,
-      connectionInfo.getPassword,queryTransLog, sparkSession)
-    val resultLog = dfResultLog.collect()
-    if(!resultLog.isEmpty) {
-      throw new InvalidArgumentException(s"DropDuplicatesJobError: $jobName")
+      connectionInfo.getPassword,queryTransLog)
+    try {
+      while (dfResultLog.rs.next()) {
+        throw new InvalidArgumentException(s"DropDuplicatesJobError: $jobName")
+      }
+    }
+    finally{
+      dfResultLog.close()
     }
   }
 
@@ -347,6 +379,34 @@ class TransformFw(override val schemaName: String,
     returnJobMap
   }
 
+  def insertAuditLogDetail(stepRun:String,stepSeq:String,jobName: String,
+                           dagRunId: String, tasksGroupNm: String,schemaName: String,
+                           tableName: String,loadType: String,roundTime:LocalDateTime,
+                           detailStartTime: LocalDateTime,status: String,ictrlDt: String,
+                           stepRunNext:String,stepSeqNext:String,
+                           connectionInfo: ConnectionInfo): Unit = {
+    val detailEndTime = LocalDateTime.now()
+    val duration = Duration.between(detailStartTime, detailEndTime)
+    val hours = duration.toHours
+    val minutes = duration.minusHours(hours).toMinutes
+    val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
+    val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
+    val sql = s"""INSERT INTO ${this.schemaName}.tbl_trans_audit_detail_logs (job_nm,tasksgroup_nm,round_time,dag_run_id,schema_nm,table_nm,load_type,job_start_time,job_end_time,duration,ictrl_dt,step_run,step_seq,status,err_msg)
+                 |                VALUES ('${jobName}','${tasksGroupNm}','${roundTime}','${dagRunId}'
+                 |                ,'${schemaName}','${tableName}','${loadType}','${detailStartTime}','${detailEndTime}',
+                 |                '${durationString}','${ictrlDt}','${stepRun}','${stepSeq}','${status}','-')""".stripMargin
+    ConnectionService.postgresqlInsertUpdateFunc(
+      connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
+      connectionInfo.getUserNm,connectionInfo.getPassword,sql,Seq.empty)
+    if((stepRunNext != null && stepRunNext == "") || (stepSeqNext != null && stepSeqNext == "")) {
+      val queryInsertLog = s"""INSERT INTO ${this.schemaName}.tbl_trans_audit_detail_next_logs (job_nm,tasksgroup_nm,round_time,job_start_time,ictrl_dt,step_run,step_seq)
+                              |                    VALUES ('${jobName}', '${tasksGroupNm}', '${roundTime}', '${detailStartTime}', '${ictrlDt}', '${stepRunNext}','${stepSeqNext}')""".stripMargin
+      ConnectionService.postgresqlInsertUpdateFunc(
+        connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
+        connectionInfo.getUserNm,connectionInfo.getPassword,queryInsertLog,Seq.empty)
+    }
+  }
+
   def checkLog(
                 prerequisiteJobNm: String,
                 prerequisiteSchema: String,
@@ -365,7 +425,7 @@ class TransformFw(override val schemaName: String,
                 backDate: Any,
                 connectionInfo: ConnectionInfo,
                 sparkSession: SparkSession
-              ): (Boolean, util.Map[String, Seq[String]]) = {
+              ): (Boolean, Map[String, Seq[String]]) = {
 
     println(s"Business column : $businessColumn")
     val tblIngestAuditLogs = s"$schemaName.tbl_ingest_audit_logs"
@@ -389,7 +449,7 @@ class TransformFw(override val schemaName: String,
     println(s"Checking Type : $checkInDate")
 
     var targetDateQueryPart: String = ""
-    var listDateTarget: Seq[String] = Seq.empty[String] // Dates expected to be present
+    var listDateTarget: List[String] = List.empty[String] // Dates expected to be present
     var records: Seq[Row] = Seq.empty[Row]
 
     val emptyFlagInt = Try(emptyFlag.toString.toInt).getOrElse(0)
@@ -419,13 +479,15 @@ class TransformFw(override val schemaName: String,
             targetDateAsDateTime = masterRefDate
         }
         targetDateQueryPart = s"'${targetDateAsDateTime.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}'"
-        listDateTarget = Seq(targetDateAsDateTime.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck)))
+        listDateTarget = List(targetDateAsDateTime.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck)))
 
         val msg = s"ref_date = $targetDateQueryPart\n" +
-          s"query = ${baseQuery.replace("{{prerequisite_job_nm}}", prerequisiteJobNm)
-            .replace("{{prerequisite_schema}}", prerequisiteSchema)
-            .replace("{{prerequisite_table}}", prerequisiteTable)
-            .replace("{{target_date}}", targetDateQueryPart)}\n"
+          s"query = ${
+            baseQuery.replace("{{prerequisite_job_nm}}", prerequisiteJobNm)
+              .replace("{{prerequisite_schema}}", prerequisiteSchema)
+              .replace("{{prerequisite_table}}", prerequisiteTable)
+              .replace("{{target_date}}", targetDateQueryPart)
+          }\n"
         println(msg)
 
         if (checkInDate == "logs") {
@@ -433,43 +495,32 @@ class TransformFw(override val schemaName: String,
             .replace("{{prerequisite_schema}}", prerequisiteSchema)
             .replace("{{prerequisite_table}}", prerequisiteTable)
             .replace("{{target_date}}", targetDateQueryPart)
-          records = ConnectionService.postgresqlQueryFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName, connectionInfo.getUserNm, connectionInfo.getPassword, queryRecordsStr,sparkSession).collect()
+          val records = ConnectionService.postgresqlQueryDirectly(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName, connectionInfo.getUserNm, connectionInfo.getPassword, queryRecordsStr)
+          try {
+            checkExistsDataWithOutCheckMiss(records.rs, listDateTarget.head, prerequisiteJobNm, emptyFlagInt, null)
+          }
+          finally {
+            records.close()
+          }
         } else if (checkInDate == "raw_date") {
-          if (businessColumn != null) {
-            println("check in date is raw data")
-            records = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTable, targetDateAsDateTime.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck)),sparkSession)
+          println("check in date is raw data")
+          records = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTable, targetDateAsDateTime.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck)), sparkSession)
+          if (records.isEmpty) {
+            val msg = "table is no record.\n"
+            println(msg)
+            (false, Map(prerequisiteJobNm -> listDateTarget))
           } else {
-            records = Seq.empty[Row]
+            if (records.nonEmpty) {
+              val msg = "table is record.\n"
+              println(msg)
+              (true, Map(prerequisiteJobNm -> Seq.empty[String])) // Check Pass
+            } else { // Should not be reached if records.nonEmpty
+              (false, Map(prerequisiteJobNm -> listDateTarget))
+            }
           }
         }
-
-        if (records.isEmpty) {
-          val msg = "table is no record.\n"
-          println(msg)
+        else {
           (false, Map(prerequisiteJobNm -> listDateTarget))
-        } else if (businessColumn != null) {
-          if (records.nonEmpty) {
-            val msg = "table is record.\n"
-            println(msg)
-            (true, Map(prerequisiteJobNm -> Seq.empty[String])) // Check Pass
-          } else { // Should not be reached if records.nonEmpty
-            (false, Map(prerequisiteJobNm -> listDateTarget))
-          }
-        } else {
-          val status = records.head.getString(3) // Assuming index 3 for status
-          val rowCnt = Option(records.head.get(4)).map(_.toString.toLong).getOrElse(0L) // Assuming index 4 for row_cnt
-
-          val msg = s"status = $status\n" + s"row_cnt = $rowCnt\n"
-          println(s"empty_flag : $emptyFlag")
-          println(s"row_cnt : $rowCnt")
-
-          if (status == "SUCCEED" && rowCnt >= emptyFlagInt) {
-            println("table is ready.\n")
-            (true, Map(prerequisiteJobNm -> Seq.empty[String])) // Check Pass
-          } else {
-            println("table is not ready.\n")
-            (false, Map(prerequisiteJobNm -> listDateTarget))
-          }
         }
 
       case "quarter" | "month_to_date" | "hour_to_date" | "daily_period" | "year_to_date" =>
@@ -609,40 +660,36 @@ class TransformFw(override val schemaName: String,
         println(s"query = $formattedQuery\n")
 
         if (checkInDate.toLowerCase == "logs") {
-          records = ConnectionService.postgresqlQueryFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName, connectionInfo.getUserNm, connectionInfo.getPassword, formattedQuery,sparkSession).collect()
+          val records = ConnectionService.postgresqlQueryDirectly(connectionInfo.getIp,
+            connectionInfo.getPort, connectionInfo.getDbName, connectionInfo.getUserNm,
+            connectionInfo.getPassword, formattedQuery)
+          try {
+            checkExistsDataWithCheckMiss(records.rs, listDateTarget, prerequisiteJobNm, emptyFlagInt, null)
+          }
+          finally{
+            records.close()
+          }
         } else if (checkInDate.toLowerCase == "raw_date") {
           records = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTable, targetDateQueryPart,sparkSession) // Pass the formatted string directly
+          if (records.isEmpty) {
+            println("table is no record.\n")
+            (false, Map(prerequisiteJobNm -> listDateTarget))
+          } else  {
+            val listLogDate = records.map(r => r.getString(0)) // Assuming business column is first in select
+            val findMiss = listDateTarget.toSet -- listLogDate.toSet
+            val msg = s"Find in not list : $findMiss\n"
+
+            if (findMiss.isEmpty) {
+              println("table is ready.\n")
+              (true, Map(prerequisiteJobNm -> Seq.empty[String]))
+            } else {
+              println("table is not ready.\n")
+              (false, Map(prerequisiteJobNm -> findMiss.toSeq.sorted))
+            }
+          }
         }
-
-        if (records.isEmpty) {
-          println("table is no record.\n")
-          (false, Map(prerequisiteJobNm -> listDateTarget))
-        } else if (businessColumn != null) {
-          val listLogDate = records.map(r => r.getString(0)) // Assuming business column is first in select
-          val findMiss = listDateTarget.toSet -- listLogDate.toSet
-          val msg = s"Find in not list : $findMiss\n"
-
-          if (findMiss.isEmpty) {
-            println("table is ready.\n")
-            (true, Map(prerequisiteJobNm -> Seq.empty[String]))
-          } else {
-            println("table is not ready.\n")
-            (false, Map(prerequisiteJobNm -> findMiss.toSeq.sorted))
-          }
-        } else {
-          val listLogDate = records.filter(r => r.getString(3) == "SUCCEED" && Option(r.get(4)).map(_.toString.toLong).getOrElse(0L) >= emptyFlagInt)
-            .map(r => r.getString(2)) // Assuming index 2 is ictrl_date
-
-          val findMiss = listDateTarget.toSet -- listLogDate.toSet
-          val msg = s"Find in not list : $findMiss\n"
-
-          if (findMiss.isEmpty) {
-            println("table is ready.\n")
-            (true, Map(prerequisiteJobNm -> Seq.empty[String]))
-          } else {
-            println("table is not ready.\n")
-            (false, Map(prerequisiteJobNm -> findMiss.toSeq.sorted))
-          }
+        else {
+          (false, Map(prerequisiteJobNm -> Seq.empty[String]))
         }
 
       case "max_date" =>
@@ -664,8 +711,17 @@ class TransformFw(override val schemaName: String,
         println(s"query = $formattedQuery\n")
 
         if (checkInDate.toLowerCase == "logs") {
-          records = ConnectionService.postgresqlQueryFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName, connectionInfo.getUserNm, connectionInfo.getPassword, formattedQuery,sparkSession).collect()
-        } else if (checkInDate.toLowerCase == "raw_date") {
+          val records = ConnectionService.postgresqlQueryDirectly(
+            connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+            connectionInfo.getUserNm, connectionInfo.getPassword,
+            formattedQuery)
+          try {
+            checkExistsDataWithCheckMissMaxDate(records.rs, dateQueryStr, prerequisiteJobNm, patternIctrlDateCheck, emptyFlagInt, masterRefDate)
+          }
+          finally {
+            records.close()
+          }
+        } else {
           var effectiveFrequencyCheck = frequencyCheck
           var effectiveTargetDateForBusinessCol = dateQueryStr
           if (useBetweenQuery) {
@@ -680,32 +736,12 @@ class TransformFw(override val schemaName: String,
             effectiveTargetDateForBusinessCol = ""
           }
           records = checkBusinessColumn(effectiveFrequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTable, effectiveTargetDateForBusinessCol,sparkSession)
-        }
-
-        if (records.isEmpty) {
-          println("table is no record.\n")
-          (false, Map(prerequisiteJobNm -> Seq(dateQueryStr)))
-        } else if (businessColumn != null) {
-          val listLogDate = records.map(r => LocalDateTime.parse(r.getString(0), DateTimeFormatter.ofPattern(patternIctrlDateCheck)))
-          val lastDatetime = listLogDate.maxBy(_.toEpochSecond(java.time.ZoneOffset.UTC)) // Get max date
-
-          println(s"Last Datetime : $lastDatetime")
-
-          if (lastDatetime.isEqual(masterRefDate) || lastDatetime.isAfter(masterRefDate)) {
-            println("table is ready.\n")
-            (true, Map(prerequisiteJobNm -> Seq.empty[String]))
-          } else {
-            println("table is not ready.\n")
+          if (records.isEmpty) {
+            println("table is no record.\n")
             (false, Map(prerequisiteJobNm -> Seq(dateQueryStr)))
-          }
-        } else {
-          val successfulRecords = records.filter(r => r.getString(3) == "SUCCEED" && Option(r.get(4)).map(_.toString.toLong).getOrElse(0L) >= emptyFlagInt)
-          if (successfulRecords.isEmpty) {
-            println("table is not ready (no successful records).\n")
-            (false, Map(prerequisiteJobNm -> Seq(dateQueryStr)))
-          } else {
-            val listLogDate = successfulRecords.map(r => LocalDateTime.parse(r.getString(2), DateTimeFormatter.ofPattern(patternIctrlDateCheck)))
-            val lastDatetime = listLogDate.maxBy(_.toEpochSecond(java.time.ZoneOffset.UTC))
+          } else  {
+            val listLogDate = records.map(r => LocalDateTime.parse(r.getString(0), DateTimeFormatter.ofPattern(patternIctrlDateCheck)))
+            val lastDatetime = listLogDate.maxBy(_.toEpochSecond(java.time.ZoneOffset.UTC)) // Get max date
 
             println(s"Last Datetime : $lastDatetime")
 
@@ -718,6 +754,42 @@ class TransformFw(override val schemaName: String,
             }
           }
         }
+//        if (records.isEmpty) {
+//          println("table is no record.\n")
+//          (false, Map(prerequisiteJobNm -> Seq(dateQueryStr)))
+//        } else if (businessColumn != null) {
+//          val listLogDate = records.map(r => LocalDateTime.parse(r.getString(0), DateTimeFormatter.ofPattern(patternIctrlDateCheck)))
+//          val lastDatetime = listLogDate.maxBy(_.toEpochSecond(java.time.ZoneOffset.UTC)) // Get max date
+//
+//          println(s"Last Datetime : $lastDatetime")
+//
+//          if (lastDatetime.isEqual(masterRefDate) || lastDatetime.isAfter(masterRefDate)) {
+//            println("table is ready.\n")
+//            (true, Map(prerequisiteJobNm -> Seq.empty[String]))
+//          } else {
+//            println("table is not ready.\n")
+//            (false, Map(prerequisiteJobNm -> Seq(dateQueryStr)))
+//          }
+//        } else {
+//          val successfulRecords = records.filter(r => r.getString(3) == "SUCCEED" && Option(r.get(4)).map(_.toString.toLong).getOrElse(0L) >= emptyFlagInt)
+//          if (successfulRecords.isEmpty) {
+//            println("table is not ready (no successful records).\n")
+//            (false, Map(prerequisiteJobNm -> Seq(dateQueryStr)))
+//          } else {
+//            val listLogDate = successfulRecords.map(r => LocalDateTime.parse(r.getString(2), DateTimeFormatter.ofPattern(patternIctrlDateCheck)))
+//            val lastDatetime = listLogDate.maxBy(_.toEpochSecond(java.time.ZoneOffset.UTC))
+//
+//            println(s"Last Datetime : $lastDatetime")
+//
+//            if (lastDatetime.isEqual(masterRefDate) || lastDatetime.isAfter(masterRefDate)) {
+//              println("table is ready.\n")
+//              (true, Map(prerequisiteJobNm -> Seq.empty[String]))
+//            } else {
+//              println("table is not ready.\n")
+//              (false, Map(prerequisiteJobNm -> Seq(dateQueryStr)))
+//            }
+//          }
+//        }
 
       case "date_range" =>
         baseQuery = queryDictMultiDay.getOrElse(logTable, throw new InvalidArgumentException(s"Unknown log table type: $logTable"))
@@ -747,39 +819,32 @@ class TransformFw(override val schemaName: String,
         println(s"query = $formattedQuery\n")
 
         if (checkInDate.toLowerCase == "logs") {
-          records = ConnectionService.postgresqlQueryFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName, connectionInfo.getUserNm, connectionInfo.getPassword, formattedQuery,sparkSession).collect()
-        } else if (checkInDate.toLowerCase == "raw_date") {
-          records = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTable, targetDateQueryPart,sparkSession)
-        }
-
-        if (records.isEmpty) {
-          println("table is no record.\n")
-          (false, Map(prerequisiteJobNm -> listDateTarget))
-        } else if (businessColumn != null) {
-          val listLogDate = records.map(r => r.getString(0))
-          val findMiss = listDateTarget.toSet -- listLogDate.toSet
-          val msg = s"Find in not list : $findMiss\n"
-
-          if (findMiss.isEmpty) {
-            println("table is ready.\n")
-            (true, Map(prerequisiteJobNm -> Seq.empty[String]))
-          } else {
-            println("table is not ready.\n")
-            (false, Map(prerequisiteJobNm -> findMiss.toSeq.sorted))
+          val records = ConnectionService.postgresqlQueryDirectly(connectionInfo.getIp,
+            connectionInfo.getPort, connectionInfo.getDbName,
+            connectionInfo.getUserNm, connectionInfo.getPassword, formattedQuery)
+          try {
+            checkExistsDataWithCheckMiss(records.rs, listDateTarget, prerequisiteJobNm, emptyFlagInt, null)
           }
-        } else {
-          val listLogDate = records.filter(r => r.getString(3) == "SUCCEED" && Option(r.get(4)).map(_.toString.toLong).getOrElse(0L) >= emptyFlagInt)
-            .map(r => r.getString(2))
+          finally {
+            records.close()
+          }
+        } else  {
+          records = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTable, targetDateQueryPart,sparkSession)
+          if (records.isEmpty) {
+            (false, Map(prerequisiteJobNm -> listDateTarget))
+          }
+          else {
+            val listLogDate = records.map(r => r.getString(0))
+            val findMiss = listDateTarget.toSet -- listLogDate.toSet
+            val msg = s"Find in not list : $findMiss\n"
 
-          val findMiss = listDateTarget.toSet -- listLogDate.toSet
-          val msg = s"Find in not list : $findMiss\n"
-
-          if (findMiss.isEmpty) {
-            println("table is ready.\n")
-            (true, Map(prerequisiteJobNm -> Seq.empty[String]))
-          } else {
-            println("table is not ready.\n")
-            (false, Map(prerequisiteJobNm -> findMiss.toSeq.sorted))
+            if (findMiss.isEmpty) {
+              println("table is ready.\n")
+              (true, Map(prerequisiteJobNm -> Seq.empty[String]))
+            } else {
+              println("table is not ready.\n")
+              (false, Map(prerequisiteJobNm -> findMiss.toSeq.sorted))
+            }
           }
         }
 
@@ -796,7 +861,7 @@ class TransformFw(override val schemaName: String,
 
 
         // Generate the list of target dates within the range for comparison
-        listDateTarget = Seq.empty[String]
+        listDateTarget = List.empty[String]
 
         // Dates on the "minus" side
         for (number <- 1 to valuesInt) {
@@ -826,47 +891,40 @@ class TransformFw(override val schemaName: String,
         println(s"query = $formattedQuery\n")
 
         if (checkInDate.toLowerCase == "logs") {
-          records = ConnectionService.postgresqlQueryFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName, connectionInfo.getUserNm, connectionInfo.getPassword, formattedQuery,sparkSession).collect()
-        } else if (checkInDate.toLowerCase == "raw_date") {
-          records = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTable, targetDateQueryPart,sparkSession)
-        }
-
-        if (records.isEmpty) {
-          println("table is no record.\n")
-          (false, Map(prerequisiteJobNm -> listDateTarget))
-        } else if (businessColumn != null) {
-          val listLogDate = records.map(r => r.getString(0))
-          val findMiss = listDateTarget.toSet -- listLogDate.toSet
-          val msg = s"Find in not list : $findMiss\n"
-
-          // "Change check if found more at once" implies if there's any overlap, it might be considered true,
-          // but the primary check is if *all* target dates are present.
-          // The Python `len(find_miss) != len(list_date_target)` condition for true is unusual for a prerequisite check
-          // (it means "not all are missing"). A more standard "all required dates are present" is `find_miss.isEmpty`.
-          // I will use `find_miss.isEmpty` for a strict "all dates are present" check, which is more robust for prerequisites.
-          // If you strictly need the original Python logic (i.e., "at least one record found"),
-          // then `records.nonEmpty` is the check.
-          // For now, adhering to the `find_miss` logic:
-          if (findMiss.isEmpty) { // Assuming "if len(find_miss) == 0" means all are found.
-            println("table is ready.\n")
-            (true, Map(prerequisiteJobNm -> Seq.empty[String]))
-          } else {
-            println("table is not ready.\n")
-            (false, Map(prerequisiteJobNm -> findMiss.toSeq.sorted))
+          val records = ConnectionService.postgresqlQueryDirectly(connectionInfo.getIp, connectionInfo.getPort,
+            connectionInfo.getDbName, connectionInfo.getUserNm,
+            connectionInfo.getPassword, formattedQuery)
+          try {
+            checkExistsDataWithCheckMiss(records.rs, listDateTarget, prerequisiteJobNm, emptyFlagInt, null)
+          }
+          finally {
+            records.close()
           }
         } else {
-          val listLogDate = records.filter(r => r.getString(3) == "SUCCEED" && Option(r.get(4)).map(_.toString.toLong).getOrElse(0L) >= emptyFlagInt)
-            .map(r => r.getString(2))
+          records = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTable, targetDateQueryPart,sparkSession)
+          if (records.isEmpty) {
+            println("table is no record.\n")
+            (false, Map(prerequisiteJobNm -> listDateTarget))
+          } else  {
+            val listLogDate = records.map(r => r.getString(0))
+            val findMiss = listDateTarget.toSet -- listLogDate.toSet
+            val msg = s"Find in not list : $findMiss\n"
 
-          val findMiss = listDateTarget.toSet -- listLogDate.toSet
-          val msg = s"Find in not list : $findMiss\n"
-
-          if (findMiss.isEmpty) {
-            println("table is ready.\n")
-            (true, Map(prerequisiteJobNm -> Seq.empty[String]))
-          } else {
-            println("table is not ready.\n")
-            (false, Map(prerequisiteJobNm -> findMiss.toSeq.sorted))
+            // "Change check if found more at once" implies if there's any overlap, it might be considered true,
+            // but the primary check is if *all* target dates are present.
+            // The Python `len(find_miss) != len(list_date_target)` condition for true is unusual for a prerequisite check
+            // (it means "not all are missing"). A more standard "all required dates are present" is `find_miss.isEmpty`.
+            // I will use `find_miss.isEmpty` for a strict "all dates are present" check, which is more robust for prerequisites.
+            // If you strictly need the original Python logic (i.e., "at least one record found"),
+            // then `records.nonEmpty` is the check.
+            // For now, adhering to the `find_miss` logic:
+            if (findMiss.isEmpty) { // Assuming "if len(find_miss) == 0" means all are found.
+              println("table is ready.\n")
+              (true, Map(prerequisiteJobNm -> Seq.empty[String]))
+            } else {
+              println("table is not ready.\n")
+              (false, Map(prerequisiteJobNm -> findMiss.toSeq.sorted))
+            }
           }
         }
 

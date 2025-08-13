@@ -13,16 +13,17 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.slf4j.LoggerFactory
 import org.springframework.core.task.TaskExecutor
 
-import java.sql.Timestamp
+import java.sql.{ResultSet, Timestamp}
 import scala.collection.JavaConversions._
 import java.text.SimpleDateFormat
-import java.time.{LocalDate, LocalDateTime}
+import java.time.{Duration, LocalDate, LocalDateTime}
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.{Callable, CompletableFuture, Future}
 import java.util.function.Supplier
 import java.{lang, util}
 import javax.servlet.http.HttpServletRequest
+import scala.:+
 import scala.util.{Failure, Success, Try}
 import scala.util.control.Breaks.{break, breakable}
 import scala.util.matching.Regex
@@ -34,6 +35,35 @@ class IngestFw(override val schemaName: String,
                override val taskExecutor: TaskExecutor) extends CustomFw {
 
   private val logger = LoggerFactory.getLogger(classOf[TransformFw])
+
+  override def postProcess(status: String,
+                           dependencyCheckModel: DependencyCheckModel,
+                           errorMsg: String,
+                           runId: String, sparkSession: SparkSession, logUrl: String,
+                           jobStartTime: LocalDateTime, jobEndTime: LocalDateTime,
+                           refDate: LocalDateTime, connectionInfo: ConnectionInfo,
+                           ictrlDt: String, jobName: String, tblLogName: String,
+                           tblConfName: String): Unit = {
+    val duration = Duration.between(jobStartTime, jobEndTime)
+    val hours = duration.toHours
+    val minutes = duration.minusHours(hours).toMinutes
+    val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
+    val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
+    val params = Seq(status, errorMsg, logUrl,
+      durationString, jobName, runId, refDate)
+    val sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
+      f"err_msg = ?, log_url = ?, duration = ? " +
+      f"where job_nm = ? and dag_run_id = ? " +
+      f"and round_time = ?"
+    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+      connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
+    if (status.equals("SUCCESS")) {
+      val sql = s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
+        s"where job_nm = '${jobName}'"
+      ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+        connectionInfo.getUserNm, connectionInfo.getPassword, sql, Seq.empty)
+    }
+  }
 
   def checkRunningIctrlDtIngest(
                                  spark: SparkSession, jobNmUpdate: String, tasksgroupNmUpdate: String,
@@ -52,7 +82,9 @@ class IngestFw(override val schemaName: String,
       s"""
     SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, target_schema_nm, target_table_nm, job_start_time, job_end_time, ictrl_dt, status
     FROM $ingestAuditLogsTable
-    WHERE lower(job_nm) = lower($jobNmUpdate) AND lower(tasksgroup_nm) = lower($tasksgroupNmUpdate) AND ictrl_dt = $ictrlDtUpdate AND status = 'RUNNING'
+    WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroup_nm) =
+    lower('$tasksgroupNmUpdate') AND ictrl_dt = '$ictrlDtUpdate' AND status = 'RUNNING'
+    AND round_time != '$roundTime'
     ORDER BY round_time DESC
     LIMIT 1
     """
@@ -61,58 +93,60 @@ class IngestFw(override val schemaName: String,
       s"""
     SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, target_schema_nm, target_table_nm, job_start_time, job_end_time, ictrl_dt, status
     FROM $ingestAuditLogsTable
-    WHERE lower(job_nm) = lower($jobNmUpdate) AND lower(tasksgroup_nm) = lower($tasksgroupNmUpdate) AND ictrl_dt IS NOT NULL AND status = 'RUNNING'
+    WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroup_nm) = lower('$tasksgroupNmUpdate')
+    AND ictrl_dt IS NOT NULL AND status = 'RUNNING' AND round_time != '$roundTime'
     ORDER BY round_time DESC
     LIMIT 1
     """
     }
-
-    val dfResultLog = ConnectionService.postgresqlQueryFunc(
+    val dfResultLog = ConnectionService.postgresqlQueryDirectly(
       connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
-      connectionInfo.getUserNm, connectionInfo.getPassword, queryIngLog,sparkSession)
+      connectionInfo.getUserNm, connectionInfo.getPassword, queryIngLog)
+    try {
+      // Has Log Running
+      breakable {
+        while (dfResultLog.rs.next()) {
+          val lastRoundTimeWIctrlDt = dfResultLog.rs.getTimestamp("round_time")
 
-    val resultLog = dfResultLog.collect()
-
-    // Has Log Running
-    if (resultLog.length > 0) {
-      val valueLog = resultLog.head
-      val lastRoundTimeWIctrlDt = valueLog.getAs[Timestamp]("round_time")
-
-      val strFormatRoundTime = new java.text.SimpleDateFormat("yyyyMMdd").format(lastRoundTimeWIctrlDt)
-      val strRoundTimeIn = new java.text.SimpleDateFormat("yyyyMMdd").format(roundTime)
-
-      if (strFormatRoundTime != strRoundTimeIn) {
-        println("Check log Complete, current round_time is newer by 1 day than the last round_time.")
-      } else {
-        val errMsg = s"Found Status RUNNING Job on ictrl_dt: $ictrlDtUpdate Running ON -> dag_run_id: ${valueLog.getAs[String]("dag_run_id")} round_time: ${valueLog.getAs[Timestamp]("round_time")}"
-        val errMsgUpdate = s"DropDuplicatesJobError: $errMsg"
-        println("-- Has Log Running in ingest audit log --")
-        dfResultLog.show()
-        println("Update Log Function")
-        val queryUpdateLog =
-          s"""
+          val strFormatRoundTime = new java.text.SimpleDateFormat("yyyyMMdd").format(lastRoundTimeWIctrlDt)
+          val strRoundTimeIn = roundTime.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
+          if (strFormatRoundTime != strRoundTimeIn) {
+            println("Check log Complete, current round_time is newer by 1 day than the last round_time.")
+            break()
+          } else {
+            val errMsg = s"Found Status RUNNING Job on ictrl_dt: $ictrlDtUpdate Running ON -> dag_run_id: ${dfResultLog.rs.getString("dag_run_id")} round_time: ${dfResultLog.rs.getTimestamp("round_time")}"
+            val errMsgUpdate = s"DropDuplicatesJobError: $errMsg"
+            println("-- Has Log Running in ingest audit log --")
+            println("Update Log Function")
+            val queryUpdateLog =
+              s"""
         UPDATE $ingestAuditLogsTable
-        SET job_start_time = $jobStartTimeUpdate,
-        ictrl_dt = $ictrlDtUpdate,
-        start_ictrl_dt = $startIctrlDtStrUpdate,
-        end_ictrl_dt = $endIctrlDtStrUpdate,
+        SET job_start_time = '$jobStartTimeUpdate',
+        ictrl_dt = '$ictrlDtUpdate',
+        start_ictrl_dt = '$startIctrlDtStrUpdate',
+        end_ictrl_dt = '$endIctrlDtStrUpdate',
         status = 'FAILED',
-        job_end_time = $jobStartTimeUpdate,
+        job_end_time = '$jobStartTimeUpdate',
         duration = '00:00:00',
         source_cnt = 0,
         process_cnt = 0,
         row_cnt = 0,
         err_msg = '$errMsgUpdate',
-        app_id = $appIdUpdate
-        WHERE job_nm = $jobNmUpdate AND tasksgroup_nm = $tasksgroupNmUpdate AND round_time = $roundTime AND dag_run_id = $dagRunId
+        app_id = '$appIdUpdate'
+        WHERE job_nm = '$jobNmUpdate' AND tasksgroup_nm = '$tasksgroupNmUpdate' AND round_time = '$roundTime' AND dag_run_id = '$dagRunId'
         """
-        ConnectionService.postgresqlInsertUpdateFunc(
-          connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
-          connectionInfo.getUserNm, connectionInfo.getPassword, queryUpdateLog,Seq.empty
-        )
-        println("Update audit log Complete")
-        throw new DropDuplicatesJobError(errMsg)
+            ConnectionService.postgresqlInsertUpdateFunc(
+              connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+              connectionInfo.getUserNm, connectionInfo.getPassword, queryUpdateLog, Seq.empty
+            )
+            println("Update audit log Complete")
+            throw new DropDuplicatesJobError(errMsg)
+          }
+        }
       }
+    }
+    finally{
+      dfResultLog.close()
     }
 
     // Checking Running Ictrl_dt With Null
@@ -124,43 +158,44 @@ class IngestFw(override val schemaName: String,
       s"""
   SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, target_schema_nm, target_table_nm, job_start_time, job_end_time, ictrl_dt, status
   FROM $ingestAuditLogsTable
-  WHERE lower(job_nm) = lower($jobNmUpdate) AND lower(tasksgroup_nm) = lower($tasksgroupNmUpdate) AND ictrl_dt IS NULL AND status = 'RUNNING' AND round_time >= '$strCheckRoundTime' AND round_time < '$strCheckCurrectRoundTime'
+  WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroup_nm) = lower('$tasksgroupNmUpdate') AND ictrl_dt IS NULL AND status = 'RUNNING' AND round_time >= '$strCheckRoundTime' AND round_time < '$strCheckCurrectRoundTime'
   ORDER BY round_time DESC
   LIMIT 1
   """
 
-    val dfResultLogNull = ConnectionService.postgresqlQueryFunc(
+    val dfResultLogNull = ConnectionService.postgresqlQueryDirectly(
       connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
-      connectionInfo.getUserNm, connectionInfo.getPassword, queryIngLogNullIctrlDt,spark)
-
-    val resultLogNull = dfResultLogNull.collect()
-
-    if (resultLogNull.length > 0) {
-      val valueLog = resultLogNull.head
-      val errMsg = s"Found Status RUNNING round_time under $hoursCheckRoundTime with ictrl_dt NULL : Running ON -> dag_run_id: ${valueLog.getAs[String]("dag_run_id")} round_time: ${valueLog.getAs[Timestamp]("round_time")}"
-      val errMsgUpdate = s"DropDuplicatesJobError: $errMsg"
-      val queryUpdateLog =
-        s"""
+      connectionInfo.getUserNm, connectionInfo.getPassword, queryIngLogNullIctrlDt)
+    try {
+      while (dfResultLogNull.rs.next()) {
+        val errMsg = s"Found Status RUNNING round_time under $hoursCheckRoundTime with ictrl_dt NULL : Running ON -> dag_run_id: ${dfResultLogNull.rs.getString("dag_run_id")} round_time: ${dfResultLogNull.rs.getTimestamp("round_time")}"
+        val errMsgUpdate = s"DropDuplicatesJobError: $errMsg"
+        val queryUpdateLog =
+          s"""
       UPDATE $ingestAuditLogsTable
-      SET job_start_time = $jobStartTimeUpdate,
-      ictrl_dt = $ictrlDtUpdate,
-      start_ictrl_dt = $startIctrlDtStrUpdate,
-      end_ictrl_dt = $endIctrlDtStrUpdate,
+      SET job_start_time = '$jobStartTimeUpdate',
+      ictrl_dt = '$ictrlDtUpdate',
+      start_ictrl_dt = '$startIctrlDtStrUpdate',
+      end_ictrl_dt = '$endIctrlDtStrUpdate',
       status = 'FAILED',
-      job_end_time = $jobStartTimeUpdate,
+      job_end_time = '$jobStartTimeUpdate',
       duration = '00:00:00',
       source_cnt = 0,
       process_cnt = 0,
       row_cnt = 0,
       err_msg = '$errMsgUpdate',
-      app_id = $appIdUpdate
-      WHERE job_nm = $jobNmUpdate AND tasksgroup_nm = $tasksgroupNmUpdate AND round_time = $roundTime AND dag_run_id = $dagRunId
+      app_id = '$appIdUpdate'
+      WHERE job_nm = '$jobNmUpdate' AND tasksgroup_nm = '$tasksgroupNmUpdate' AND round_time = '$roundTime' AND dag_run_id = '$dagRunId'
       """
-      ConnectionService.postgresqlInsertUpdateFunc(
-        connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
-        connectionInfo.getUserNm, connectionInfo.getPassword, queryUpdateLog)
-      println("Update audit log Complete")
-      throw new DropDuplicatesJobError(errMsg)
+        ConnectionService.postgresqlInsertUpdateFunc(
+          connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+          connectionInfo.getUserNm, connectionInfo.getPassword, queryUpdateLog)
+        println("Update audit log Complete")
+        throw new DropDuplicatesJobError(errMsg)
+      }
+    }
+    finally{
+      dfResultLogNull.close()
     }
 
     // More Codition Check SUCCEED Log
@@ -169,95 +204,93 @@ class IngestFw(override val schemaName: String,
         s"""
     SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, target_schema_nm, target_table_nm, job_start_time, job_end_time, ictrl_dt, status
     FROM $ingestAuditLogsTable
-    WHERE lower(job_nm) = lower($jobNmUpdate) AND lower(tasksgroupNm) = lower($tasksgroupNmUpdate) AND ictrl_dt = $ictrlDtUpdate AND status = 'SUCCEED' AND err_msg = '-'
+    WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroupNm) = lower('$tasksgroupNmUpdate') AND ictrl_dt = '$ictrlDtUpdate' AND status = 'SUCCEED' AND err_msg = '-'
     ORDER BY round_time DESC
     LIMIT 1
     """
-      val dfResultLogSuccess = ConnectionService.postgresqlQueryFunc(
+      val dfResultLogSuccess = ConnectionService.postgresqlQueryDirectly(
         connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
-        connectionInfo.getUserNm, connectionInfo.getPassword, queryIngLogSuccess,spark)
+        connectionInfo.getUserNm, connectionInfo.getPassword, queryIngLogSuccess)
+      try {
+        while (dfResultLogSuccess.rs.next()) {
+          val errMsg = s"Found Status SUCCEED Job on ictrl_dt: $ictrlDtUpdate Running ON -> dag_run_id: ${dfResultLogSuccess.rs.getString("dag_run_id")} round_time: ${dfResultLogSuccess.rs.getTimestamp("round_time")}"
+          println(errMsg)
 
-      val resultLogSuccess = dfResultLogSuccess.collect()
+          println("-- Has Log Success in ingest audit log --")
 
-      if (resultLogSuccess.length > 0) {
-        val valueLog = resultLogSuccess.head
-        val errMsg = s"Found Status SUCCEED Job on ictrl_dt: $ictrlDtUpdate Running ON -> dag_run_id: ${valueLog.getAs[String]("dag_run_id")} round_time: ${valueLog.getAs[Timestamp]("round_time")}"
-        println(errMsg)
-
-        println("-- Has Log Success in ingest audit log --")
-        dfResultLogSuccess.show()
-
-        val queryDeleteLog =
-          s"""
+          val queryDeleteLog =
+            s"""
       DELETE FROM $ingestAuditLogsTable
-      WHERE job_nm = $jobNmUpdate AND tasksgroup_nm = $tasksgroupNmUpdate AND round_time = $roundTime AND dag_run_id = $dagRunId
+      WHERE job_nm = '$jobNmUpdate' AND tasksgroup_nm = '$tasksgroupNmUpdate' AND round_time = '$roundTime' AND dag_run_id = '$dagRunId'
       """
-        ConnectionService.postgresqlInsertUpdateFunc(
-          connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
-          connectionInfo.getUserNm, connectionInfo.getPassword, queryDeleteLog
-        )
-        println("Delete audit log Complete")
-        throw new DropDuplicatesJobError(errMsg)
-      } else {
-        println("Check log Complete, Has No job SUCCEED with ictrl_dt")
+          ConnectionService.postgresqlInsertUpdateFunc(
+            connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+            connectionInfo.getUserNm, connectionInfo.getPassword, queryDeleteLog
+          )
+          println("Delete audit log Complete")
+          throw new DropDuplicatesJobError(errMsg)
+        }
+      }
+      finally{
+        dfResultLogSuccess.close()
       }
     }
   }
 
-  def doGetDelayDayStatus(postgresConnectionInfo: ConnectionInfo,
-                          currentLocalDateRun: LocalDateTime, jobName: String,
-                          refDateIctrlDt: String, dateFormatIctrlDtForTb: String): String = {
-    val queryIngestionLogs = f"select * from $schemaName.tbl_ingest_audit_logs where lower(job_nm) = lower('${jobName}')"
-    val ingestionLogJobs = ConnectionService.postgresqlQueryFunc(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
-      postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm, postgresConnectionInfo.getPassword, queryIngestionLogs,sparkSession)
-    val currentLocalDate = currentLocalDateRun.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
-    val getLogSuccessPostgresql =  f"""SELECT job_nm, job_start_time, status
-        FROM (
-            SELECT
-                job_nm,
-                status,
-                job_start_time,
-                ROW_NUMBER() OVER (PARTITION BY job_start_time ORDER BY job_start_time DESC) AS rn
-            FROM fwconfz.tbl_ingest_audit_logs
-            WHERE
-                job_start_time BETWEEN
-                    (TO_TIMESTAMP('$currentLocalDate 00:00:00', 'YYYY-MM-DD HH24:MI:SS') - INTERVAL '1 day')
-                    AND TO_TIMESTAMP('$currentLocalDate 23:59:59', 'YYYY-MM-DD HH24:MI:SS')
-                AND status = 'SUCCEED'
-                AND job_nm = 'check_job_nm'
-        ) a
-        WHERE rn = 1
-        ORDER BY job_start_time DESC
-        LIMIT 1"""
-    val ingestionLogsSuccess = ConnectionService.postgresqlQueryFunc(
-      postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
-      postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm,
-      postgresConnectionInfo.getPassword,
-      getLogSuccessPostgresql,sparkSession)
-    val delayTimeResult = delayTime(sparkSession, jobName,refDateIctrlDt,
-      currentLocalDate,null, dateFormatIctrlDtForTb)
-    val logSuccessCount = ingestionLogsSuccess.count()
-    var delayDayStatus = "-"
-    if(delayTimeResult._1.isEmpty && delayTimeResult._2 == "-") {
-
-    }
-    else if(delayTimeResult._1.head == "Delay flag is off"
-      && delayTimeResult._2 == "Delay flag is off") {
-
-    }
-    else if(ingestionLogJobs.isEmpty) {
-      if(!delayTimeResult._1.contains(currentLocalDate)) {
-        delayDayStatus = "Not a Date to do this job"
-      }
-    }
-    else if(logSuccessCount == 1 && delayTimeResult._1.contains(currentLocalDate)) {
-      delayDayStatus = "Job Has already Done"
-    }
-    else if(!delayTimeResult._1.contains(currentLocalDate)) {
-      delayDayStatus = "Not a Date to do this job"
-    }
-    delayDayStatus
-  }
+//  def doGetDelayDayStatus(postgresConnectionInfo: ConnectionInfo,
+//                          currentLocalDateRun: LocalDateTime, jobName: String,
+//                          refDateIctrlDt: String, dateFormatIctrlDtForTb: String): String = {
+//    val queryIngestionLogs = f"select * from $schemaName.tbl_ingest_audit_logs where lower(job_nm) = lower('${jobName}')"
+//    val ingestionLogJobs = ConnectionService.postgresqlQueryFunc(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
+//      postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm, postgresConnectionInfo.getPassword, queryIngestionLogs,sparkSession)
+//    val currentLocalDate = currentLocalDateRun.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+//    val getLogSuccessPostgresql =  f"""SELECT job_nm, job_start_time, status
+//        FROM (
+//            SELECT
+//                job_nm,
+//                status,
+//                job_start_time,
+//                ROW_NUMBER() OVER (PARTITION BY job_start_time ORDER BY job_start_time DESC) AS rn
+//            FROM fwconfz.tbl_ingest_audit_logs
+//            WHERE
+//                job_start_time BETWEEN
+//                    (TO_TIMESTAMP('$currentLocalDate 00:00:00', 'YYYY-MM-DD HH24:MI:SS') - INTERVAL '1 day')
+//                    AND TO_TIMESTAMP('$currentLocalDate 23:59:59', 'YYYY-MM-DD HH24:MI:SS')
+//                AND status = 'SUCCEED'
+//                AND job_nm = 'check_job_nm'
+//        ) a
+//        WHERE rn = 1
+//        ORDER BY job_start_time DESC
+//        LIMIT 1"""
+//    val ingestionLogsSuccess = ConnectionService.postgresqlQueryFunc(
+//      postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
+//      postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm,
+//      postgresConnectionInfo.getPassword,
+//      getLogSuccessPostgresql,sparkSession)
+//    val delayTimeResult = delayTime(sparkSession, jobName,refDateIctrlDt,
+//      currentLocalDate,null, dateFormatIctrlDtForTb)
+//    val logSuccessCount = ingestionLogsSuccess.count()
+//    var delayDayStatus = "-"
+//    if(delayTimeResult._1.isEmpty && delayTimeResult._2 == "-") {
+//
+//    }
+//    else if(delayTimeResult._1.head == "Delay flag is off"
+//      && delayTimeResult._2 == "Delay flag is off") {
+//
+//    }
+//    else if(ingestionLogJobs.isEmpty) {
+//      if(!delayTimeResult._1.contains(currentLocalDate)) {
+//        delayDayStatus = "Not a Date to do this job"
+//      }
+//    }
+//    else if(logSuccessCount == 1 && delayTimeResult._1.contains(currentLocalDate)) {
+//      delayDayStatus = "Job Has already Done"
+//    }
+//    else if(!delayTimeResult._1.contains(currentLocalDate)) {
+//      delayDayStatus = "Not a Date to do this job"
+//    }
+//    delayDayStatus
+//  }
 
   override def doRunFramework(dependencyCheckModel: DependencyCheckModel,
                               JOB_TYPE: JobConstant.JOB_TYPE,jobName: String,
@@ -277,7 +310,8 @@ class IngestFw(override val schemaName: String,
           val frequency = controlJobDf.getAs[String]("frequency")
           val backdate = controlJobDf.getAs[Any]("back_day")
           var currentLocalDateRun: LocalDateTime = null
-          val catchUpType = controlJobDf.getAs[String]("catchup_type")
+          val taskGroupName = controlJobDf.getAs[String]("tasksgroup_nm")
+          val catchUpType = JobConstant.CATCHUP_TYPE.SEQUENCE.getValue
           val ictrlDtTgtFmt = controlJobDf.getAs[String]("ictrl_dt_tgtfmt")
           val dateFormatIctrlDtForTb = convertPythonDateFormatToJava(ictrlDtTgtFmt)
           val timeRetry = controlJobDf.getAs[Int]("time_retry")
@@ -314,7 +348,12 @@ class IngestFw(override val schemaName: String,
           val sb = new StringBuilder()
           var overlap: String = "0"
           if (JOB_TYPE != JobConstant.JOB_TYPE.KAFKA) {
-            overlap = controlJobDf.getAs[String]("overlap")
+            overlap = if(controlJobDf.getAs[Any]("overlap") != null) {
+              controlJobDf.getAs[Any]("overlap").toString
+            }
+            else {
+              "0"
+            }
           }
           var isContinueRunning: Boolean = true
           var ictrlDtRun: LocalDateTime = null
@@ -349,14 +388,14 @@ class IngestFw(override val schemaName: String,
               val refDateIctrlDt = ictrlDtRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
               val runTime: LocalDateTime = LocalDateTime.now()
               insertRoundAuditLog(dependencyCheckModel,
-                controlJobDf.getAs[String]("schema_nm"), controlJobDf.getAs[String]("table_nm"),
+                controlJobDf.getAs[String]("target_schema_nm"), controlJobDf.getAs[String]("target_table_nm"),
                 runId, refDateIctrlDt, postgresConnectionInfo, runTime, startIctrlDt, endIctrlDt,
-                roundTime,controlJobDf.getAs[String]("load_type"),controlJobDf.getAs[String]("ingest_type"),
-                controlJobDf.getAs[String]("tasksgroup_nm"))
-              checkRunningIctrlDtIngest(sparkSession, jobName,
-                dependencyCheckModel.getTaskGroupName, refDateIctrlDt, roundTime, runTime, startIctrlDt,
-                endIctrlDt, "ongoing", isCdr, runId, sparkSession.sparkContext.applicationId, postgresConnectionInfo,
-                sparkSession)
+                roundTime,controlJobDf.getAs[String]("load_type"),controlJobDf.getAs[String]("ingestion_type"),
+                taskGroupName)
+//              checkRunningIctrlDtIngest(sparkSession, jobName,
+//                taskGroupName, refDateIctrlDt, roundTime, runTime, startIctrlDt,
+//                endIctrlDt, "ongoing", isCdr, runId, sparkSession.sparkContext.applicationId, postgresConnectionInfo,
+//                sparkSession)
               try {
                 breakable {
                   for (i <- 0 to totalRetry) {
@@ -387,27 +426,31 @@ class IngestFw(override val schemaName: String,
                 }
                 val param: java.util.HashMap[String, JsonNode] = new util.HashMap[String, JsonNode]()
                 param.put("job_nm", objectMapper.valueToTree(jobName))
-                param.put("tasksgroup_nm", objectMapper.valueToTree(dependencyCheckModel.getTaskGroupName))
-                param.put("rl_ref_date", objectMapper.valueToTree(origRefDate))
-                param.put("ictrl_dt", objectMapper.valueToTree(ictrlDtRun))
+                param.put("tasksgroup_nm", objectMapper.valueToTree(taskGroupName))
+                param.put("rl_ref_date", objectMapper.valueToTree(ictrlDtRun.toString))
+                param.put("ictrl_dt", objectMapper.valueToTree(refDateIctrlDt))
                 param.put("start_ictrl_dt", objectMapper.valueToTree(startIctrlDt))
                 param.put("end_ictrl_dt", objectMapper.valueToTree(endIctrlDt))
                 param.put("start_ictrl_dt_w_overlap", objectMapper.valueToTree(startDateWithOverlapIctrlDt))
                 param.put("end_ictrl_dt_w_overlap", objectMapper.valueToTree(endIctrlDt))
-                param.put("ictrl_dt_type", objectMapper.valueToTree(controlJobDf.getAs[String]("ictrl_dt_type")))
+                if(controlJobDf.getAs[String]("ictrl_dt_type") != null)
+                  param.put("ictrl_dt_type", objectMapper.valueToTree(controlJobDf.getAs[String]("ictrl_dt_type")))
+                else
+                  param.put("ictrl_dt_type", objectMapper.valueToTree("system"))
                 param.put("ictrl_dt_tgtfmt", objectMapper.valueToTree(ictrlDtTgtFmt))
                 param.put("frequency_job", objectMapper.valueToTree(frequency))
                 param.put("load_type", objectMapper.valueToTree(controlJobDf.getAs[String]("load_type")))
                 param.put("table_conf", objectMapper.valueToTree(tblConfName))
-                param.put("manual_ref_date", objectMapper.valueToTree(false))
+                param.put("manual_ref_date", objectMapper.valueToTree("False"))
+                param.put("last_success_ictrl_dt",objectMapper.valueToTree(currentDateRun))
                 param.put("dag_run_id", objectMapper.valueToTree(runId))
                 if (dependencyCheckModel.getTaskGroupName != null)
                   param.put("job_run_mode", objectMapper.valueToTree("tasksgroup"))
                 else
                   param.put("job_run_mode", objectMapper.valueToTree("job"))
-                param.put("round_time", objectMapper.valueToTree(roundTime))
+                param.put("round_time", objectMapper.valueToTree(roundTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS"))))
                 val runNotebookParallelResult =
-                  doRunNotebookParallel(param, "", dependencyCheckModel,
+                  doRunNotebookParallel(param, "2M4GWV7SQ", dependencyCheckModel,
                     username, runId,httpServletRequest)
                 var status = ""
                 if (runNotebookParallelResult.getErrorMsg != null) {
@@ -425,6 +468,12 @@ class IngestFw(override val schemaName: String,
                   LocalDateTime.now(), roundTime, postgresConnectionInfo, refDateIctrlDt, jobName,
                   "tbl_trans_audit_logs", tblConfName)
                 sb.append(runNotebookParallelResult.getMessage)
+                if (catchUpType.equalsIgnoreCase(CATCHUP_TYPE.SEQUENCE.getValue)) {
+                  currentLocalDateRun = addDateByFrequency(currentLocalDateRun, frequency)
+                  if (currentLocalDateRun.isAfter(masterRefDate)) {
+                    isContinueRunning = false
+                  }
+                }
               }
               catch {
                 case exception: Exception => {
@@ -458,11 +507,11 @@ class IngestFw(override val schemaName: String,
       schemaName,tableName,jobStartTime,ictrlDt,startIctrlDt,endIctrlDt,
       dependencyCheckModel.getModuleNotebookName,loadType,ingestType,taskGroupName)
     val sql = f"insert into ${this.schemaName}.tbl_ingest_audit_logs (job_nm,round_time," +
-      f"dag_run_id,target_schema_nm,target_table_nm,ingestion_type," +
-      f"load_type,job_start_time,ictrl_dt,start_ictrl_dt," +
-      f"end_ictrl_dt,status,zeppelin,load_type,ingest_type,tasksgroup_nm) values (" +
-      f"?,?,?,?,?,?,?" +
-      f"?,?,?,?,'RUNNING'," +
+      f"dag_run_id,target_schema_nm,target_table_nm," +
+      f"job_start_time,ictrl_dt,start_ictrl_dt," +
+      f"end_ictrl_dt,status,zeppelin,load_type,ingestion_type,tasksgroup_nm) values (" +
+      f"?,?,?,?,?,?,?," +
+      f"?,?,'RUNNING'," +
       f"?,?,?,?)"
     ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
       connectionInfo.getUserNm,connectionInfo.getPassword,sql,seqValue)
@@ -651,7 +700,6 @@ class IngestFw(override val schemaName: String,
                         logTable: String = "tbl_ingest_logs", depenIp: String = "", depenPort: String = "",
                         depenUserNm: String = "", depenPassword: String = "", depenSid: String = "",
                         postgresConnectionInfo:ConnectionInfo): (Boolean, Map[String, List[String]]) = {
-
     def convertPythonToPysparkFormat(pyFormat: String): String = {
       val pythonToPyspark = Map(
         "%Y" -> "yyyy", "%y" -> "yy", "%m" -> "MM", "%B" -> "MMMM", "%b" -> "MMM",
@@ -690,10 +738,25 @@ class IngestFw(override val schemaName: String,
           val targetDate = masterRefDate.format(DateTimeFormatter.ofPattern(patternIctrlDtCheck))
           val query = s"$baseQuery and ictrl_dt like '$targetDate%' order by job_start_time desc"
 
-          val records = if (checkInDate == "logs" && prerequisiteJobNameStr.nonEmpty) {
-            ConnectionService.postgresqlQueryFunc(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort, postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm, postgresConnectionInfo.getPassword,query,sparkSession).collect()
+          if (checkInDate == "logs" && prerequisiteJobNameStr.nonEmpty) {
+            val result = ConnectionService.postgresqlQueryDirectly(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
+              postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm,
+              postgresConnectionInfo.getPassword,query)
+            try {
+              checkExistsDataWithOutCheckMiss(result.rs, targetDate, prerequisiteJobNameStr, emptyFlag, prerequisiteTableCleaned)
+            }
+            finally {
+              result.close()
+            }
           } else if (checkInDate == "rawDate") {
-            checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTableCleaned, targetDate,sparkSession)
+            val result = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTableCleaned, targetDate,sparkSession)
+            if(result.isEmpty) {
+              val name = if (prerequisiteJobNameStr.nonEmpty) prerequisiteJobNameStr else prerequisiteTableCleaned
+              (false, Map(name -> List(targetDate)))
+            }
+            else {
+              (true, Map(prerequisiteJobNameStr -> List()))
+            }
           } else {
             // Case for Oracle dependency check
             val conditionWhereJobNm = if (prerequisiteJobNameStr.isEmpty) "" else s"AND WORKFLOW_NM IN ('$prerequisiteJobNameStr')"
@@ -745,26 +808,8 @@ class IngestFw(override val schemaName: String,
                  |) TD
                  |WHERE rownum = 1
                  |""".stripMargin
-            oracleIngestionQueryLog(sparkSession,depenIp, depenPort, depenUserNm, depenPassword, dbDailyQuery, depenSid).collect()
-          }
-
-          if (records.isEmpty) {
-            println("Table is no record.")
-            val name = if (prerequisiteJobNameStr.nonEmpty) prerequisiteJobNameStr else prerequisiteTableCleaned
-            (false, Map(name -> List(targetDate)))
-          } else if (checkInDate == "rawDate") {
-            println("table is record.")
-            (true, Map(prerequisiteJobNameStr -> List()))
-          } else {
-            val status = records.head.getString(3)
-            val rowCnt = if (records.head.get(4) != null) records.head.getLong(4) else 0L
-            if (status == "SUCCEED" && rowCnt >= emptyFlag) {
-              println("table is ready.")
-              (true, Map(prerequisiteJobNameStr -> List()))
-            } else {
-              println("table is not ready.")
-              (false, Map(prerequisiteJobNameStr -> List(targetDate)))
-            }
+            val result = oracleIngestionQueryLog(sparkSession,depenIp, depenPort, depenUserNm, depenPassword, dbDailyQuery, depenSid).collect()
+            checkExistsDataWithOutCheckMiss(result,targetDate,prerequisiteJobNameStr,emptyFlag,prerequisiteTableCleaned)
           }
 
         case "hourly" =>
@@ -774,29 +819,24 @@ class IngestFw(override val schemaName: String,
           val query = s"$baseQuery and ictrl_dt like '$targetDate%' order by job_start_time desc"
           println(s"Query: $query")
 
-          val records = if (checkInDate == "logs") {
-            ConnectionService.postgresqlQueryFunc(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
+          if (checkInDate == "logs") {
+            val records = ConnectionService.postgresqlQueryDirectly(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
               postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm,
-              postgresConnectionInfo.getPassword, query,sparkSession).collect()
+              postgresConnectionInfo.getPassword, query)
+            try {
+              checkExistsDataWithOutCheckMiss(records.rs, targetDate, prerequisiteJobNameStr, emptyFlag, prerequisiteTableCleaned)
+            }
+            finally {
+              records.close()
+            }
           } else {
-            checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTableCleaned, targetDate,sparkSession)
-          }
-
-          if (records.isEmpty) {
-            println("Table is no record.")
-            (false, Map(prerequisiteJobNameStr -> List(targetDate)))
-          } else if (checkInDate == "rawDate") {
-            println("table is record.")
-            (true, Map(prerequisiteJobNameStr -> List()))
-          } else {
-            val status = records.head.getString(3)
-            val rowCnt = if (records.head.get(4) != null) records.head.getLong(4) else 0L
-            if (status == "SUCCEED" && rowCnt >= emptyFlag) {
-              println("table is ready.")
+            val result = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTableCleaned, targetDate,sparkSession)
+            if(result.isEmpty) {
+              val name = if (prerequisiteJobNameStr.nonEmpty) prerequisiteJobNameStr else prerequisiteTableCleaned
+              (false, Map(name -> List(targetDate)))
+            }
+            else {
               (true, Map(prerequisiteJobNameStr -> List()))
-            } else {
-              println("table is not ready.")
-              (false, Map(prerequisiteJobNameStr -> List(targetDate)))
             }
           }
 
@@ -819,33 +859,19 @@ class IngestFw(override val schemaName: String,
           val query = s"$baseQuery and ictrl_dt $targetDateCondition order by job_start_time desc"
           println(s"Query: $query")
 
-          val records = if (checkInDate == "logs") {
-            ConnectionService.postgresqlQueryFunc(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
+          if (checkInDate == "logs") {
+            val records = ConnectionService.postgresqlQueryDirectly(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
               postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm,
-              postgresConnectionInfo.getPassword, query,sparkSession).collect()
-          } else {
-            checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTableCleaned, targetDateCondition,sparkSession)
-          }
-
-          if (records.isEmpty) {
-            println("Table is no record.")
-            (false, Map(prerequisiteJobNameStr -> listDateTarget))
-          } else if (checkInDate == "rawDate") {
-            val listLogDate = records.map(_.getString(0)).toList
-            val findMiss = listDateTarget.toSet -- listLogDate.toSet
-            if (findMiss.isEmpty) {
-              println("Table is ready.")
-              (true, Map(prerequisiteJobNameStr -> List()))
-            } else {
-              println("Table is not ready.")
-              (false, Map(prerequisiteJobNameStr -> findMiss.toList))
+              postgresConnectionInfo.getPassword, query)
+            try {
+              checkExistsDataWithCheckMiss(records.rs, listDateTarget, prerequisiteJobNameStr, emptyFlag, null)
             }
-          } else { // checkInDate is "logs"
-            val rowCnt = if (records.head.get(4) != null) records.head.getLong(4) else 0L
-            val listLogDate = records.filter(row =>
-              row.getString(3) == "SUCCEED" && row.get(4) != null && row.getLong(4) >= emptyFlag
-            ).map(_.getString(2)).toList
-
+            finally {
+              records.close()
+            }
+          } else {
+            val records = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTableCleaned, targetDateCondition,sparkSession)
+            val listLogDate = records.map(_.getString(0)).toList
             val findMiss = listDateTarget.toSet -- listLogDate.toSet
             if (findMiss.isEmpty) {
               println("Table is ready.")
@@ -875,43 +901,33 @@ class IngestFw(override val schemaName: String,
           val query = s"$baseQuery and ictrl_dt $targetDateCondition order by job_start_time desc"
           println(s"Query: $query")
 
-          val records = if (checkInDate == "logs") {
-            ConnectionService.postgresqlQueryFunc(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
+          if (checkInDate == "logs") {
+            val records = ConnectionService.postgresqlQueryDirectly(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
               postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm,
-              postgresConnectionInfo.getPassword, query,sparkSession).collect()
-          } else {
-            checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTableCleaned, targetDateCondition,sparkSession)
-          }
-
-          if (records.isEmpty) {
-            println("Table is no record.")
-            (false, Map(prerequisiteJobNameStr -> listDateTarget))
-          } else if (checkInDate == "rawDate") {
-            val logRequire = 24 / values.map(_.toInt).getOrElse(1)
-            val listLogDate = records.map(_.getString(0)).toList
-            val findMiss = listDateTarget.toSet -- listLogDate.toSet
-            val numberOfMiss = 24 - logRequire
-            if (findMiss.size <= numberOfMiss) {
-              println("Table is ready.")
-              (true, Map(prerequisiteJobNameStr -> List()))
-            } else {
-              println("Table is not ready.")
-              (false, Map(prerequisiteJobNameStr -> findMiss.toList))
+              postgresConnectionInfo.getPassword, query)
+            try {
+              checkExistsDataWithCheckMiss(records.rs, listDateTarget, prerequisiteJobNameStr, emptyFlag, values)
             }
-          } else { // checkInDate is "logs"
-            val logRequire = 24 / values.map(_.toInt).getOrElse(1)
-            val listLogDate = records.filter(row =>
-              row.getString(3) == "SUCCEED" && row.get(4) != null && row.getLong(4) >= emptyFlag
-            ).map(_.getString(2)).toList
-
-            val findMiss = listDateTarget.toSet -- listLogDate.toSet
-            val numberOfMiss = 24 - logRequire
-            if (findMiss.size <= numberOfMiss) {
-              println("Table is ready.")
-              (true, Map(prerequisiteJobNameStr -> List()))
+            finally {
+              records.close()
+            }
+          } else {
+            val records = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTableCleaned, targetDateCondition,sparkSession)
+            if (records.isEmpty) {
+              println("Table is no record.")
+              (false, Map(prerequisiteJobNameStr -> listDateTarget))
             } else {
-              println("Table is not ready.")
-              (false, Map(prerequisiteJobNameStr -> findMiss.toList))
+              val logRequire = 24 / values.map(_.toInt).getOrElse(1)
+              val listLogDate = records.map(_.getString(0)).toList
+              val findMiss = listDateTarget.toSet -- listLogDate.toSet
+              val numberOfMiss = 24 - logRequire
+              if (findMiss.size <= numberOfMiss) {
+                println("Table is ready.")
+                (true, Map(prerequisiteJobNameStr -> List()))
+              } else {
+                println("Table is not ready.")
+                (false, Map(prerequisiteJobNameStr -> findMiss.toList))
+              }
             }
           }
 

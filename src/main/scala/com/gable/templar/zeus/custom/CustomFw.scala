@@ -3,19 +3,20 @@ package com.gable.templar.zeus.custom
 import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.gable.templar.constant.JobConstant
-import com.gable.templar.constant.JobConstant.{JOB_TYPE, initialTitle, manualTitle}
+import com.gable.templar.constant.JobConstant.{JOB_TYPE, importParameter, initialTitle, manualTitle}
 import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse, NotebookCheckParallelRequest, NotebookIdAddParameterRequest, NotebookRunParallelRequest, NotebookRunParallelResponse, RunNotebookParallelResult}
 import com.gable.templar.exception.DropDuplicatesJobError
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.heaven.util.{HTTPServletRequestUtil, RestTemplateFactoryUtil}
 import com.gable.templar.zeus.controller.model.LoginUser
 import com.gable.templar.zeus.service.vector.ConnectionInfo
+import org.apache.spark.sql.types.{BinaryType, BooleanType, DataType, DateType, DecimalType, DoubleType, IntegerType, LongType, StringType, StructField, StructType, TimestampType}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.slf4j.{Logger, LoggerFactory}
 import org.springframework.core.task.TaskExecutor
 import org.springframework.web.context.request.{RequestContextHolder, ServletRequestAttributes}
 
-import java.sql.{DriverManager, Timestamp}
+import java.sql.{DriverManager, ResultSet, ResultSetMetaData, Timestamp, Types}
 import java.time.{Duration, LocalDate, LocalDateTime}
 import java.time.format.{DateTimeFormatter, DateTimeParseException}
 import java.time.temporal.ChronoUnit
@@ -44,7 +45,7 @@ trait CustomFw {
 
 
   var tmpzSchema: String = {
-    if(schemaName.endsWith("_uat")) {
+    if (schemaName.endsWith("_uat")) {
       "tmpz_uat"
     }
     else {
@@ -63,16 +64,16 @@ trait CustomFw {
   scalaObjectMapper.registerModule(DefaultScalaModule)
 
   def doRunFramework(dependencyCheckModel: DependencyCheckModel,
-                     JOB_TYPE: JOB_TYPE,jobName: String,controlJobDf: Row,
-                     tblConfName: String,httpServletRequest: HttpServletRequest,
+                     JOB_TYPE: JOB_TYPE, jobName: String, controlJobDf: Row,
+                     tblConfName: String, httpServletRequest: HttpServletRequest,
                      username: String): CompletableFuture[ExecuteResponse]
 
   def checkDependencyByJobName(controlJobDf: Row,
-                               masterRefDate: LocalDateTime,connectionInfo: ConnectionInfo,
+                               masterRefDate: LocalDateTime, connectionInfo: ConnectionInfo,
                                refDateIctrlDt: String, startICtrlDt: String,
-                               postgresConnectionInfo: ConnectionInfo,jobName: String): java.util.Map[String,Boolean]
+                               postgresConnectionInfo: ConnectionInfo, jobName: String): java.util.Map[String, Boolean]
 
-  def parseToLocalDateTime(input: String,format: String): Option[LocalDateTime] = {
+  def parseToLocalDateTime(input: String, format: String): Option[LocalDateTime] = {
     try {
       Some(LocalDateTime.parse(input, DateTimeFormatter.ofPattern(format)))
     } catch {
@@ -112,27 +113,100 @@ trait CustomFw {
     }
   }
 
+  def rsToDataFrame(rs: ResultSet, spark: SparkSession): Array[Row] = {
+    val md: ResultSetMetaData = rs.getMetaData
+    val n = md.getColumnCount
 
-  def doRunTaskGroup(dependencyCheckModel: DependencyCheckModel,jobType: JOB_TYPE): util.ArrayList[ExecuteResponse] = {
+    def toDataType(i: Int): DataType = md.getColumnType(i) match {
+      case Types.BOOLEAN | Types.BIT            => BooleanType
+      case Types.TINYINT | Types.SMALLINT       => IntegerType
+      case Types.INTEGER                         => IntegerType
+      case Types.BIGINT                          => LongType
+      case Types.FLOAT | Types.REAL | Types.DOUBLE => DoubleType
+      case Types.DECIMAL | Types.NUMERIC =>
+        val p = math.max(1, md.getPrecision(i))
+        val s = math.max(0, md.getScale(i))
+        // Spark DecimalType max precision is 38
+        DecimalType(math.min(p, 38), math.min(s, 38))
+      case Types.DATE                            => DateType
+      case Types.TIME | Types.TIME_WITH_TIMEZONE => StringType // or TimestampType if you convert
+      case Types.TIMESTAMP | Types.TIMESTAMP_WITH_TIMEZONE => TimestampType
+      case Types.BINARY | Types.VARBINARY | Types.LONGVARBINARY => BinaryType
+      case _                                     => StringType
+    }
+
+    val fields = (1 to n).map { i =>
+      // prefer label (AS alias) over raw column name
+      val name = Option(md.getColumnLabel(i)).filter(_.nonEmpty).getOrElse(md.getColumnName(i))
+      StructField(name, toDataType(i), nullable = true)
+    }
+    val schema = StructType(fields)
+    val useJava8 = spark.conf.getOption("spark.sql.datetime.java8API.enabled").exists(_.toBoolean)
+
+    val rows = ArrayBuffer.empty[Row]
+    while (rs.next()) {
+      val values = new Array[Any](n)
+      var i = 1
+      while (i <= n) {
+        val v = schema(i-1).dataType match {
+          case BooleanType   => { val x = rs.getBoolean(i); if (rs.wasNull()) null else x }
+          case IntegerType   => { val x = rs.getInt(i);     if (rs.wasNull()) null else x }
+          case LongType      => { val x = rs.getLong(i);    if (rs.wasNull()) null else x }
+          case DoubleType    => { val x = rs.getDouble(i);  if (rs.wasNull()) null else x }
+          case d: DecimalType=> rs.getBigDecimal(i) // Spark will accept java.math.BigDecimal for DecimalType
+          case DateType      =>
+            val d = rs.getDate(i)
+            if (rs.wasNull()) null
+            else if (useJava8) d.toLocalDate else d             // keep java.sql.Date
+          case TimestampType =>
+            val t = rs.getTimestamp(i)
+            if (rs.wasNull()) null
+            else if (useJava8) t.toInstant else t    // keep java.sql.Timestamp
+          case BinaryType    => rs.getBytes(i)
+          case _             => rs.getString(i)            // default to text
+        }
+        values(i-1) = v
+        i += 1
+      }
+      rows += Row.fromSeq(values)
+    }
+    val df = spark.createDataFrame(spark.sparkContext.parallelize(rows), schema)
+    df.collect()
+  }
+
+
+  def doRunTaskGroup(dependencyCheckModel: DependencyCheckModel, jobType: JOB_TYPE): util.ArrayList[ExecuteResponse] = {
     val tblConfName = getTblConfNameByJobType(jobType)
+    val queryMasterSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = 'fw_postgre'"
+    val postgresConnectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql, salt, ultKey)
     val httpServletRequest = RequestContextHolder.getRequestAttributes.asInstanceOf[ServletRequestAttributes].getRequest
-    if(dependencyCheckModel.getTaskGroupName != null && dependencyCheckModel.getJobName == null) {
+    if (dependencyCheckModel.getTaskGroupName != null && dependencyCheckModel.getJobName == null) {
       val executeResult = new util.ArrayList[ExecuteResponse]()
-      val query = f"""select *
-                     |from ${schemaName}.$tblConfName
-                     |where lower(tasksgroup_nm) = lower('${dependencyCheckModel.getTaskGroupName}') and lower(active_flag) = lower('Y')""".stripMargin
-      val taskGroupDf = sparkSession.sql(query).collect()
+      val query =
+        f"""select *
+           |from ${schemaName}.$tblConfName
+           |where lower(tasksgroup_nm) = lower('${dependencyCheckModel.getTaskGroupName}') and lower(active_flag) = lower('Y')""".stripMargin
+      val taskGroupConnection = ConnectionService.postgresqlQueryDirectly(
+        postgresConnectionInfo.getIp,postgresConnectionInfo.getPort,
+        postgresConnectionInfo.getDbName,postgresConnectionInfo.getUserNm,
+        postgresConnectionInfo.getPassword,query)
       val completableFutureList = ArrayBuffer[CompletableFuture[ExecuteResponse]]()
-      taskGroupDf.foreach(r => {
-        val executeResponse = new ExecuteResponse
-        executeResponse.setJobName(r.getAs[String]("job_nm"))
-        completableFutureList += doRunFramework(dependencyCheckModel,
-          jobType,r.getAs[String]("job_nm"),r,tblConfName,httpServletRequest,loginUser.getUsername)
-        executeResult.add(executeResponse)
-      })
+      try {
+        val taskGroupDf = rsToDataFrame(taskGroupConnection.rs, sparkSession)
+        taskGroupDf.foreach(r => {
+          val executeResponse = new ExecuteResponse
+          executeResponse.setJobName(r.getAs[String]("job_nm"))
+          completableFutureList += doRunFramework(dependencyCheckModel,
+            jobType, r.getAs[String]("job_nm"), r, tblConfName, httpServletRequest, loginUser.getUsername)
+          executeResult.add(executeResponse)
+        })
+      }
+      finally{
+        taskGroupConnection.close()
+      }
       val allOf = CompletableFuture.allOf(completableFutureList: _*)
       allOf.join()
-      for(completableFuture <- completableFutureList) {
+      for (completableFuture <- completableFutureList) {
         executeResult.add(completableFuture.get())
       }
       executeResult
@@ -143,26 +217,35 @@ trait CustomFw {
         f"""select * from $schemaName.$tblConfName where lower(job_nm) = lower('${dependencyCheckModel.getJobName}')
            | and lower(active_flag) = lower('Y')
            |""".stripMargin
-      val jobDf = sparkSession.sql(query)
-      val row = jobDf.collect()(0)
+      val taskGroupConnection = ConnectionService.postgresqlQueryDirectly(
+        postgresConnectionInfo.getIp,postgresConnectionInfo.getPort,
+        postgresConnectionInfo.getDbName,postgresConnectionInfo.getUserNm,
+        postgresConnectionInfo.getPassword,query)
+      var row: Row = null
+      try{
+        row = rsToDataFrame(taskGroupConnection.rs, sparkSession)(0)
+      }
+      finally{
+        taskGroupConnection.close()
+      }
       executeResult.add(CompletableFuture.completedFuture(
-        doRunFramework(dependencyCheckModel,jobType,
-        row.getAs[String]("job_nm"),row,tblConfName,
-          httpServletRequest,loginUser.getUsername)).get().get())
+        doRunFramework(dependencyCheckModel, jobType,
+          row.getAs[String]("job_nm"), row, tblConfName,
+          httpServletRequest, loginUser.getUsername)).get().get())
       executeResult
     }
   }
 
   def updateStateOfAuditLogByJobNameAndRoundTimeAndDagRun(status: String, dependencyCheckModel: DependencyCheckModel,
-                                                          runId: String, jobEndTime:LocalDateTime,
+                                                          runId: String, jobEndTime: LocalDateTime,
                                                           roundTime: LocalDateTime, connectionInfo: ConnectionInfo,
-                                                          errorMsg: String,tableNm: String): Unit = {
-    val params = Seq(status,jobEndTime,errorMsg,dependencyCheckModel.getJobName,runId,roundTime)
+                                                          errorMsg: String, tableNm: String): Unit = {
+    val params = Seq(status, jobEndTime, errorMsg, dependencyCheckModel.getJobName, runId, roundTime)
     val sql = f"update ${this.schemaName}.$tableNm set status = ?, " +
       f"job_end_time = ?,  err_msg = ? where " +
       f"job_nm = ? and dag_run_id = ? and round_time = ?"
-    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
-      connectionInfo.getUserNm,connectionInfo.getPassword,sql,params)
+    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+      connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
   }
 
   def postProcess(status: String,
@@ -170,35 +253,37 @@ trait CustomFw {
                   errorMsg: String,
                   runId: String, sparkSession: SparkSession, logUrl: String,
                   jobStartTime: LocalDateTime, jobEndTime: LocalDateTime,
-                  refDate: LocalDateTime,connectionInfo: ConnectionInfo,
-                  ictrlDt: String,jobName: String,tblLogName: String,
-                  tblConfName:String): Unit = {
-    val duration = Duration.between(jobStartTime,jobEndTime)
+                  refDate: LocalDateTime, connectionInfo: ConnectionInfo,
+                  ictrlDt: String, jobName: String, tblLogName: String,
+                  tblConfName: String): Unit = {
+    val duration = Duration.between(jobStartTime, jobEndTime)
     val rowCount = sparkSession.table(f"$tmpzSchema.${jobName}_tmp_validation").count()
     val hours = duration.toHours
     val minutes = duration.minusHours(hours).toMinutes
     val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
     val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
-    val params = Seq(status,errorMsg,rowCount,logUrl,
-      durationString,jobName,runId,refDate)
+    val params = Seq(status, errorMsg, rowCount, logUrl,
+      durationString, jobName, runId, refDate)
     val sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
       f"err_msg = ?, row_cnt = ?, log_url = ?, duration = ? " +
       f"where job_nm = ? and dag_run_id = ? " +
       f"and round_time = ?"
-    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
-      connectionInfo.getUserNm,connectionInfo.getPassword,sql,params)
-    if(status.equals("SUCCESS"))
-      sparkSession.sql(s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
-        s"where job_nm = '${jobName}'")
+    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+      connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
+    if (status.equals("SUCCESS")) {
+      val sql = s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
+        s"where job_nm = '${jobName}'"
+      ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+        connectionInfo.getUserNm, connectionInfo.getPassword, sql, Seq.empty)
+    }
   }
 
 
-
-  def doRunNotebookParallel(param: java.util.HashMap[String,JsonNode], notebookId: String,
-                            dependencyCheckModel: DependencyCheckModel,username: String,
-                            runId: String,httpServletRequest: HttpServletRequest): RunNotebookParallelResult = {
+  def doRunNotebookParallel(param: java.util.HashMap[String, JsonNode], notebookId: String,
+                            dependencyCheckModel: DependencyCheckModel, username: String,
+                            runId: String, httpServletRequest: HttpServletRequest): RunNotebookParallelResult = {
     val runNotebookParallelResult = new RunNotebookParallelResult
-    param.put("dag_run_id",objectMapper.valueToTree(runId))
+    param.put("dag_run_id", objectMapper.valueToTree(runId))
     val token = HTTPServletRequestUtil.getToken(httpServletRequest)
     val notebookRunParallelRequest = new NotebookRunParallelRequest
     notebookRunParallelRequest.setRunBy(username)
@@ -207,17 +292,18 @@ trait CustomFw {
     notebookRunParallelRequest.setLanguage("python")
     notebookRunParallelRequest.setModuleNotebookName(dependencyCheckModel.getModuleNotebookName)
     val notebookIdAddParameterRequest: NotebookIdAddParameterRequest = new NotebookIdAddParameterRequest
-    val addParameterRequest: java.util.Map[String, java.util.Map[String, JsonNode]] = new java.util.HashMap[String,java.util.Map[String,JsonNode]]()
-    addParameterRequest.put(initialTitle,param)
-    addParameterRequest.put(manualTitle,param)
+    val addParameterRequest: java.util.Map[String, java.util.Map[String, JsonNode]] = new java.util.HashMap[String, java.util.Map[String, JsonNode]]()
+    addParameterRequest.put(initialTitle, param)
+    addParameterRequest.put(manualTitle, param)
+    addParameterRequest.put(importParameter,param)
     notebookIdAddParameterRequest.setNotebookId(notebookId)
     notebookIdAddParameterRequest.setAddParameterMapFromTitle(addParameterRequest)
     val notebookIdAddParameterRequestList: java.util.ArrayList[NotebookIdAddParameterRequest] = new util.ArrayList[NotebookIdAddParameterRequest]()
     notebookIdAddParameterRequestList.add(notebookIdAddParameterRequest)
     notebookRunParallelRequest.setNotebookAddParameterRequest(notebookIdAddParameterRequestList)
     logger.info(f"request  = ${objectMapper.writeValueAsString(notebookRunParallelRequest)}")
-    val response = RestTemplateFactoryUtil.getRestTemplar(token,true).postForObject(f"$heraUrl/private/notebook/start/session/parallel",notebookRunParallelRequest, classOf[NotebookRunParallelResponse])
-    val notebookList =  response.getNotebookRefIds
+    val response = RestTemplateFactoryUtil.getRestTemplar(token, true).postForObject(f"$heraUrl/private/notebook/start/session/parallel", notebookRunParallelRequest, classOf[NotebookRunParallelResponse])
+    val notebookList = response.getNotebookRefIds
     logger.info(f"request parallel result = ${response}")
     val notebookCheckParallelRequest = new NotebookCheckParallelRequest
     notebookCheckParallelRequest.setRunningId(runId)
@@ -226,30 +312,30 @@ trait CustomFw {
     var errorCount = 0
     var notebookUrl = ""
     var timeSleep: Long = 0L
-    if(dependencyCheckModel.getTimeSleep == null) {
+    if (dependencyCheckModel.getTimeSleep == null) {
       timeSleep = 15L
     }
     else {
       timeSleep = dependencyCheckModel.getTimeSleep
     }
-    while(!notebookList.isEmpty) {
-      Thread.sleep(timeSleep*1000)
-      val response = RestTemplateFactoryUtil.getRestTemplar(token,true).postForObject(f"$heraUrl/private/notebook/session/parallel/check",notebookCheckParallelRequest,classOf[java.util.HashMap[String,java.util.HashMap[String,String]]])
+    while (!notebookList.isEmpty) {
+      Thread.sleep(timeSleep * 1000)
+      val response = RestTemplateFactoryUtil.getRestTemplar(token, true).postForObject(f"$heraUrl/private/notebook/session/parallel/check", notebookCheckParallelRequest, classOf[java.util.HashMap[String, java.util.HashMap[String, String]]])
       response.entrySet().forEach(r => {
-        logger.info("r value = {}",r.getValue)
-        if(!r.getValue.get("status").equals("RUNNING") && !r.getValue.get("status").equals("READY")) {
+        logger.info("r value = {}", r.getValue)
+        if (!r.getValue.get("status").equals("RUNNING") && !r.getValue.get("status").equals("READY")) {
           returnResponse.append(f"note name = ${r.getKey} run ${r.getValue.get("status")} url = ${r.getValue.get("url")} result = ${r.getValue.get("message")} ${System.lineSeparator()}")
-          if(!r.getValue.get("status").equals("SUCCESS")) {
+          if (!r.getValue.get("status").equals("SUCCESS")) {
             errorCount += 1
           }
-          if(r.getValue.get("url") != null){
+          if (r.getValue.get("url") != null) {
             notebookUrl = r.getValue.get("url")
           }
           notebookList.remove(r.getValue.get("notebookIdRef"))
         }
       })
     }
-    if(errorCount > 0) {
+    if (errorCount > 0) {
       returnResponse.append("There is error on some notebook")
       runNotebookParallelResult.setErrorMsg(returnResponse.toString())
       runNotebookParallelResult.setErrorSpecificMsg(f"There is error on some notebook url = $notebookUrl")
@@ -342,13 +428,13 @@ trait CustomFw {
     val listOrderToCheck: List[Any] = List(
       List("%Y", "%y"), // Year (full, abbreviated)
       List("%U", "%W"), // Week number (Sunday start, Monday start)
-      "%m",            // Month
-      "%w",            // Weekday (0-6)
-      "%d",            // Day of month
-      "%H",            // Hour (24-hour)
-      "%M",            // Minute
-      "%S",            // Second
-      "%f"             // Microsecond
+      "%m", // Month
+      "%w", // Weekday (0-6)
+      "%d", // Day of month
+      "%H", // Hour (24-hour)
+      "%M", // Minute
+      "%S", // Second
+      "%f" // Microsecond
     )
 
     for (itemIn <- listOrderToCheck) {
@@ -532,9 +618,117 @@ trait CustomFw {
       .replace("%M", "mm")
       .replace("%S", "ss")
       .replace("%f", "SSSSSS") // Milliseconds or nanoseconds depending on precision
-      .replace("%%", "%")     // Handle escaped %
+      .replace("%%", "%") // Handle escaped %
     // ... add more conversions as needed (e.g., %y, %U, %W, %w)
   }
+
+
+  def checkExistsDataWithOutCheckMiss(records: Array[Row], targetDate: String,
+                                      prerequisiteJobNameStr: String, emptyFlag: Int,
+                                      prerequisiteTableCleaned: String): (Boolean, Map[String, List[String]]) = {
+    if (records.isEmpty) {
+      println("Table is no record.")
+      val name = if (prerequisiteJobNameStr.nonEmpty) prerequisiteJobNameStr else prerequisiteTableCleaned
+      (false, Map(name -> List(targetDate)))
+    } else {
+      val status = records.head.getString(3)
+      val rowCnt = if (records.head.get(4) != null) records.head.getLong(4) else 0L
+      if (status == "SUCCEED" && rowCnt >= emptyFlag) {
+        println("table is ready.")
+        (true, Map(prerequisiteJobNameStr -> List()))
+      } else {
+        println("table is not ready.")
+        (false, Map(prerequisiteJobNameStr -> List(targetDate)))
+      }
+    }
+  }
+
+  def checkExistsDataWithCheckMissMaxDate(records: ResultSet, dateQueryStr: String,
+                                          prerequisiteJobNm: String, patternIctrlDateCheck: String,
+                                          emptyFlag: Int, masterRefDate: LocalDateTime): (Boolean, Map[String, List[String]]) = {
+    var successFulRecordsDate: List[LocalDateTime] = List.empty
+    var isRecordExists: Boolean = false
+    while(records.next()) {
+      if(records.getString(4) == "SUCCEED" && records.getLong(5) >= emptyFlag) {
+        successFulRecordsDate =successFulRecordsDate :+ parseToLocalDateTime(records.getString(3),patternIctrlDateCheck).get
+      }
+      isRecordExists = true
+    }
+    if(!isRecordExists) {
+      return (false, Map(prerequisiteJobNm -> List(dateQueryStr)))
+    }
+    if(successFulRecordsDate.isEmpty) {
+      (false, Map(prerequisiteJobNm -> List(dateQueryStr)))
+    }
+    else {
+      val lastDateTime = successFulRecordsDate.maxBy(_.toEpochSecond(java.time.ZoneOffset.UTC))
+      if (lastDateTime.isEqual(masterRefDate) || lastDateTime.isAfter(masterRefDate)) {
+        println("table is ready.\n")
+        (true, Map(prerequisiteJobNm -> List.empty[String]))
+      } else {
+        println("table is not ready.\n")
+        (false, Map(prerequisiteJobNm -> List(dateQueryStr)))
+      }
+    }
+  }
+
+  def checkExistsDataWithCheckMiss(records: ResultSet, listDateTarget: List[String],
+                                   prerequisiteJobNameStr: String,
+                                   emptyFlag: Int,values: Option[String]): (Boolean, Map[String, List[String]]) = {
+    var listLogDate: List[String] = List.empty[String]
+    var isRecordExists: Boolean = false
+    while(records.next()) {
+      if(records.getLong(5) >= emptyFlag && records.getString(4) == "SUCCEED") {
+        listLogDate = listLogDate :+ records.getString(3)
+      }
+      isRecordExists = true
+    }
+    if(!isRecordExists) {
+      return (false, Map(prerequisiteJobNameStr -> listDateTarget))
+    }
+    if(values != null) {
+      val logRequire = 24 / values.map(_.toInt).getOrElse(1)
+      val findMiss = listDateTarget.toSet -- listLogDate.toSet
+      val numberOfMiss = 24 - logRequire
+      if (findMiss.size <= numberOfMiss) {
+        logger.info("Table is ready.")
+        (true, Map(prerequisiteJobNameStr -> List()))
+      } else {
+        logger.info("Table is not ready.")
+        (false, Map(prerequisiteJobNameStr -> findMiss.toList))
+      }
+    }
+    else {
+      val findMiss = listDateTarget.toSet -- listLogDate.toSet
+      if (findMiss.isEmpty) {
+        logger.info("Table is ready.")
+        (true, Map(prerequisiteJobNameStr -> List()))
+      } else {
+        logger.info("Table is not ready.")
+        (false, Map(prerequisiteJobNameStr -> findMiss.toList))
+      }
+    }
+  }
+
+  def checkExistsDataWithOutCheckMiss(records: ResultSet, targetDate: String,
+                                      prerequisiteJobNameStr: String,emptyFlag: Int,
+                                      prerequisiteTableCleaned: String): (Boolean, Map[String, List[String]]) = {
+    while(records.next()) {
+      val status = records.getString(4)
+      val rowCnt = records.getLong(5)
+      if (status == "SUCCEED" && rowCnt >= emptyFlag) {
+        println("table is ready.")
+        return (true, Map(prerequisiteJobNameStr -> List()))
+      } else {
+        println("table is not ready.")
+        return (false, Map(prerequisiteJobNameStr -> List(targetDate)))
+      }
+    }
+    val name = if (prerequisiteJobNameStr.nonEmpty) prerequisiteJobNameStr else prerequisiteTableCleaned
+    (false, Map(name -> List(targetDate)))
+  }
+
+
 
   def checkBusinessColumn(
                            frequencyCheck: String,

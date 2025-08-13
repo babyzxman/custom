@@ -38,6 +38,8 @@ public class JobConstant {
 
     public static final String initialTitle = "Initial";
 
+    public static final String importParameter = "import_parameter";
+
     public static final String manualTitle = "Manual_Parameters";
 
     public static final String tableNmApiIngestion = "tbl_api_ingestion";
