@@ -9,10 +9,8 @@ import com.gable.templar.heaven.service.custom.DefaultCustomService;
 import com.gable.templar.zeus.SparkServer;
 import com.gable.templar.zeus.config.HeraConfig;
 import com.gable.templar.zeus.controller.model.LoginUser;
-import com.gable.templar.zeus.custom.CustomFw;
-import com.gable.templar.zeus.custom.GeneralService;
-import com.gable.templar.zeus.custom.IngestFw;
-import com.gable.templar.zeus.custom.TransformFw;
+import com.gable.templar.zeus.custom.*;
+import com.gable.templar.zeus.service.vector.ConnectionInfo;
 import org.apache.spark.sql.SparkSession;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.task.TaskExecutor;
@@ -32,6 +30,10 @@ public class DependencyCheckCustomProd extends DefaultCustomService<DependencyCh
 
     @Autowired
     private TaskExecutor taskExecutor;
+
+    private final String salt = "rTYlPkZH37QOf7Xx1GzZ0hakdl/2/Z02HlPesDfQ2lM=";
+
+    private final String ultKey = "AdKX67Zn0JRJSGJQ7/4LrQOsZ0IW8+Fcdh7hpeJV8GeVNiPIs4i0RZ4T+XjXyEb0";
 
     @PostConstruct
     void init() {
@@ -53,13 +55,15 @@ public class DependencyCheckCustomProd extends DefaultCustomService<DependencyCh
     public Object execute(DependencyCheckModel params) throws Exception {
         SparkSession sparkSession = SparkServer.getZeusSession().session();
         JobConstant.JOB_TYPE jobType = null;
+        String queryMasterSql = "SELECT system,key,values FROM fwconfz.tbl_master_config where system = 'fw_postgre'";
+        ConnectionInfo postgresConnectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql, salt, ultKey);
         if(params.getTaskGroupName() != null) {
             jobType = generalService.checkJobTypeFromTaskGroup(
                     params.getTaskGroupName(),sparkSession,"fwconfz");
         }
         else {
             jobType = generalService.checkJobTypeFromJobName(
-                    params.getJobName(), sparkSession, "fwconfz");
+                    params.getJobName(), "fwconfz",postgresConnectionInfo);
         }
         CustomFw customFw = getCustomFwClassByJobType(jobType);
         ExecuteResponseWrap executeResponseWrap = new ExecuteResponseWrap();

@@ -6,6 +6,7 @@ import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession, functions}
 import org.apache.spark.sql.functions.{avg, col, expr}
 
+import java.sql.ResultSet
 import scala.util.Try
 import scala.util.matching.Regex
 
@@ -13,12 +14,89 @@ object DataValidator {
 
   // Assumed SparkSession is available in the environment
 
+  def parseListString(s: String): List[String] = {
+    if (s == null || s.trim.isEmpty) {
+      List.empty[String]
+    } else {
+      s.stripPrefix("[").stripSuffix("]").split(",").map(_.trim.stripPrefix("'").stripSuffix("'")).toList
+    }
+  }
+
+  def processValidationRows(spark: SparkSession,
+                             validationDf: ResultSet,
+                             tmpValidationNm: String,
+                             loadType: String
+                           ): Map[String, Boolean] = {
+
+    var validationCountSeq = 1
+    val resultDict = scala.collection.mutable.Map[String, Boolean]()
+
+    while (validationDf.next()) {
+      println(s"Start validate on seq : $validationCountSeq")
+
+      val vdJobName = validationDf.getString("job_nm")
+      val vdSchemaName = validationDf.getString("schema_nm")
+      val vdTableName = validationDf.getString("tbl_nm")
+      val vdRuleName = validationDf.getString("rule_nm")
+      val tmpVdTableName = s"${vdTableName}_$tmpValidationNm"
+      val vdRuleCalc = validationDf.getString("rule_calc")
+
+      val vdRuleCalcApplyColString = validationDf.getString("rule_calc_apply_col")
+      val vdRuleCalcApplyCol: List[String] = parseListString(vdRuleCalcApplyColString)
+
+      val vdExpectValue = validationDf.getInt("expect_value")
+
+      val vdOperation = validationDf.getString("operation")
+      val vdSqlCalc = validationDf.getString("sql_calc")
+
+      val vdSqlCalcApplyString = validationDf.getString("sql_calc_apply")
+      val vdSqlCalcApply: List[String] = parseListString(vdSqlCalcApplyString)
+
+      val vdInsertMode = loadType
+
+      val vdMarginPct = validationDf.getInt("margin_pct")
+
+      val vdValidateSeq = validationDf.getInt("validate_seq")
+
+      // The original code had a duplicate assignment `validate_seq = validation_row['sql_calc_apply']`,
+      // which appears to be a bug. I've removed it.
+
+      println(s"Validating rule nm : $vdRuleName seq : $vdValidateSeq")
+      println(s"vd_schema_name : $vdSchemaName")
+      println(s"vd_tbl_name : $vdTableName and tmp_validation is $tmpVdTableName")
+      println(s"vd_rule_calc : $vdRuleCalc")
+      println(s"vd_rule_calc_apply_col : $vdRuleCalcApplyCol")
+      println(s"vd_expect_value : $vdExpectValue")
+      println(s"vd_operation : $vdOperation")
+      println(s"vd_sql_calc : $vdSqlCalc")
+      println(s"vd_sql_calc_apply : $vdSqlCalcApply")
+      println(s"vd_insert_mode : $vdInsertMode")
+      println(s"vd_margin_pct_acceptable : $vdMarginPct")
+      println(s"vd_validate_seq : $vdValidateSeq")
+      println("---------------------")
+
+      val isValid = validateTblOperation(
+        vdJobName, vdSchemaName, tmpVdTableName, vdRuleCalc, vdRuleCalcApplyCol,
+        vdExpectValue, vdOperation, vdSqlCalc, vdSqlCalcApply, vdMarginPct,spark
+      )
+
+      resultDict.update(s"${vdRuleName}_rule seq : $vdValidateSeq", isValid)
+      validationCountSeq += 1
+    }
+
+    val keysWithN = resultDict.filter(!_._2).keys.toList
+    println(s"Keys with False result: $keysWithN")
+    if(keysWithN.nonEmpty) {
+      throw new InvalidArgumentException("validate not data not success")
+    }
+    resultDict.toMap
+  }
+
   def validateTblOperation(jobName: String, schemaName: String, tblName: String, ruleCalc: String, ruleCalcApplyCol: List[String],
                            expectValue: Double, operation: String, sqlCalc: String = "",
                            sqlCalcApply: List[String] = List.empty, marginPct: Double = 0,
                            spark: SparkSession): Boolean = {
 
-    println("Start validation")
 
     val lowerBound = expectValue - (expectValue * marginPct / 100)
     val upperBound = expectValue + (expectValue * marginPct / 100)

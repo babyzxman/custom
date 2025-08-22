@@ -22,11 +22,15 @@ public class DependencyCheckModel {
 
     private String runType;
 
+    private String workspaceName;
+
     private Long timeout = 86400L;
 
     private Long timeSleep = 10L;
 
     private String moduleNotebookName;
+
+    private Boolean runInTimeRange = false;
 
     private String notebookId;
 
@@ -132,5 +136,21 @@ public class DependencyCheckModel {
 
     public void setNotebookId(String notebookId) {
         this.notebookId = notebookId;
+    }
+
+    public Boolean getRunInTimeRange() {
+        return runInTimeRange;
+    }
+
+    public void setRunInTimeRange(Boolean runInTimeRange) {
+        this.runInTimeRange = runInTimeRange;
+    }
+
+    public String getWorkspaceName() {
+        return workspaceName;
+    }
+
+    public void setWorkspaceName(String workspaceName) {
+        this.workspaceName = workspaceName;
     }
 }

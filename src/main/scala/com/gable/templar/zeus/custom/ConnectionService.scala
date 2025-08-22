@@ -149,6 +149,7 @@ object ConnectionService {
     password = objectMapper.readTree(password).get("value").asText()
     connectionInfo.setPassword(password)
     connectionInfo.setDbType(getValue("db_type"))
+    connectionInfo.setSid(getValue("SID"))
 
     println("Query Complete")
 

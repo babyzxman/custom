@@ -2,7 +2,7 @@ package com.gable.templar.zeus.custom
 
 import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import com.gable.templar.constant.JobConstant
-import com.gable.templar.constant.JobConstant.CATCHUP_TYPE
+import com.gable.templar.constant.JobConstant.{CATCHUP_TYPE, LOAD_TYPE}
 import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse}
 import com.gable.templar.exception.{DropDuplicatesJobError, RunNotebookParallelException}
 import com.gable.templar.heaven.exception.InvalidArgumentException
@@ -24,6 +24,8 @@ import java.util.function.Supplier
 import java.{lang, util}
 import javax.servlet.http.HttpServletRequest
 import scala.:+
+import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
 import scala.util.{Failure, Success, Try}
 import scala.util.control.Breaks.{break, breakable}
 import scala.util.matching.Regex
@@ -36,6 +38,101 @@ class IngestFw(override val schemaName: String,
 
   private val logger = LoggerFactory.getLogger(classOf[TransformFw])
 
+
+  override def insertAuditLogDetail(stepRun:String,stepSeq:String,jobName: String,
+                                    dagRunId: String, tasksGroupNm: String,schemaName: String,
+                                    tableName: String,loadType: String,roundTime:LocalDateTime,
+                                    detailStartTime: LocalDateTime,status: String,ictrlDt: String,
+                                    stepRunNext:String,stepSeqNext:String,
+                                    connectionInfo: ConnectionInfo,auditLogDetail: String,
+                                    auditLogDetailNext: String): Unit = {
+    val detailEndTime = LocalDateTime.now()
+    val duration = Duration.between(detailStartTime, detailEndTime)
+    val hours = duration.toHours
+    val minutes = duration.minusHours(hours).toMinutes
+    val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
+    val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
+    val sql = s"""INSERT INTO ${this.schemaName}.$auditLogDetail (job_nm,tasksgroup_nm,round_time,dag_run_id,target_schema_nm,target_table_nm,load_type,job_start_time,job_end_time,duration,ictrl_dt,step_run,step_seq,status,err_msg)
+                 |                VALUES ('${jobName}','${tasksGroupNm}','${roundTime}','${dagRunId}'
+                 |                ,'${schemaName}','${tableName}','${loadType}','${detailStartTime}','${detailEndTime}',
+                 |                '${durationString}','${ictrlDt}','${stepRun}','${stepSeq}','${status}','-')""".stripMargin
+    ConnectionService.postgresqlInsertUpdateFunc(
+      connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
+      connectionInfo.getUserNm,connectionInfo.getPassword,sql,Seq.empty)
+    if((stepRunNext != null && stepRunNext == "") || (stepSeqNext != null && stepSeqNext == "")) {
+      val queryInsertLog = s"""INSERT INTO ${this.schemaName}.$auditLogDetailNext (job_nm,tasksgroup_nm,round_time,job_start_time,ictrl_dt,step_run,step_seq)
+                              |                    VALUES ('${jobName}', '${tasksGroupNm}', '${roundTime}', '${detailStartTime}', '${ictrlDt}', '${stepRunNext}','${stepSeqNext}')""".stripMargin
+      ConnectionService.postgresqlInsertUpdateFunc(
+        connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
+        connectionInfo.getUserNm,connectionInfo.getPassword,queryInsertLog,Seq.empty)
+    }
+  }
+
+  case class RowData(
+                      frequencyCheck: String,
+                      prerequisiteTableNm: String,
+                      prerequisiteSchemaNm: String,
+                      prerequisiteJobNm: String,
+                      value: String,
+                      emptyFlag: Int,
+                      dataColumn: String,
+                      ictrlDtTgtfmt: String
+                    )
+
+  val blackListNullString = Set("","null", "none", "nan", "none", "na")
+
+
+  def processResultSetWithSingleLoop(resultSet: ResultSet): (Boolean, List[String], Option[RowData]) = {
+
+    var firstRow: Option[RowData] = None
+    val prerequisiteJobNames = ListBuffer.empty[String]
+
+    var allUnique = true
+
+    breakable {
+      while (resultSet.next()) {
+        val currentRow = RowData(
+          frequencyCheck = resultSet.getString("frequency_check"),
+          prerequisiteTableNm = resultSet.getString("prerequisite_table_nm"),
+          prerequisiteSchemaNm = resultSet.getString("prerequisite_schema_nm"),
+          prerequisiteJobNm = resultSet.getString("prerequisite_job_nm"),
+          value = resultSet.getString("value"),
+          emptyFlag = resultSet.getInt("empty_flag"),
+          dataColumn = resultSet.getString("data_column"),
+          ictrlDtTgtfmt = resultSet.getString("ictrl_dt_tgtfmt")
+        )
+
+        if (firstRow.isEmpty) {
+          firstRow = Some(currentRow)
+        } else {
+          // Check for uniqueness against the first row's values
+          val prevRow = firstRow.get
+          if (prevRow.frequencyCheck != currentRow.frequencyCheck ||
+            prevRow.prerequisiteTableNm != currentRow.prerequisiteTableNm ||
+            prevRow.prerequisiteSchemaNm != currentRow.prerequisiteSchemaNm) {
+            allUnique = false
+            break()
+          }
+        }
+        prerequisiteJobNames += currentRow.prerequisiteJobNm
+      }
+    }
+
+    // If the result set was empty
+    if (prerequisiteJobNames.isEmpty) {
+      (false, List.empty[String], None)
+    }
+    // Check the final conditions
+    else if (allUnique && firstRow.get.frequencyCheck.toLowerCase == "daily") {
+      (true, prerequisiteJobNames.toList, firstRow)
+    }
+    // If conditions are not met
+    else {
+      (false, List.empty[String], None)
+    }
+  }
+
+
   override def postProcess(status: String,
                            dependencyCheckModel: DependencyCheckModel,
                            errorMsg: String,
@@ -43,21 +140,43 @@ class IngestFw(override val schemaName: String,
                            jobStartTime: LocalDateTime, jobEndTime: LocalDateTime,
                            refDate: LocalDateTime, connectionInfo: ConnectionInfo,
                            ictrlDt: String, jobName: String, tblLogName: String,
-                           tblConfName: String): Unit = {
+                           tblConfName: String,lastSuccessIctrlDt: String): Unit = {
+    val query = f"select * from ${this.schemaName}.$tblLogName where " +
+      f"job_nm = '${dependencyCheckModel.getJobName}' and dag_run_id = '${runId}' and ictrl_dt = '${ictrlDt}' " +
+        f"and round_time = '${refDate}'"
+    val df = ConnectionService.postgresqlQueryDirectly(connectionInfo.getIp,connectionInfo.getPort,
+      connectionInfo.getDbName,connectionInfo.getUserNm,connectionInfo.getPassword,query)
+    var isHaveErrorMsg = false
+    while(df.rs.next()) {
+      val errorMsg = df.rs.getString("err_msg")
+      isHaveErrorMsg = errorMsg != null && errorMsg.nonEmpty && errorMsg != "-"
+    }
     val duration = Duration.between(jobStartTime, jobEndTime)
     val hours = duration.toHours
     val minutes = duration.minusHours(hours).toMinutes
     val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
     val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
-    val params = Seq(status, errorMsg, logUrl,
-      durationString, jobName, runId, refDate)
-    val sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
-      f"err_msg = ?, log_url = ?, duration = ? " +
-      f"where job_nm = ? and dag_run_id = ? " +
-      f"and round_time = ?"
+    var params: Seq[Any] = Seq.empty
+    var sql: String = null
+    if(!isHaveErrorMsg) {
+      params = Seq(status, errorMsg, logUrl,
+        durationString, jobEndTime, jobName, runId, ictrlDt, refDate)
+      sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
+        f"err_msg = ?, log_url = ?, duration = ?, job_end_time = ?  " +
+        f"where job_nm = ? and dag_run_id = ? and ictrl_dt = ? " +
+        f"and round_time = ?"
+    }
+    else {
+      params = Seq(status, logUrl,
+        durationString, jobEndTime, jobName, runId, ictrlDt, refDate)
+      sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
+        f"log_url = ?, duration = ?, job_end_time = ?  " +
+        f"where job_nm = ? and dag_run_id = ? and ictrl_dt = ? " +
+        f"and round_time = ?"
+    }
     ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
       connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
-    if (status.equals("SUCCESS")) {
+    if (status.equals("SUCCESS") && (lastSuccessIctrlDt == null || lastSuccessIctrlDt.toInt < ictrlDt.toInt)){
       val sql = s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
         s"where job_nm = '${jobName}'"
       ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
@@ -199,7 +318,7 @@ class IngestFw(override val schemaName: String,
     }
 
     // More Codition Check SUCCEED Log
-    if (processJobType == "ongoing" && cdrFlag) {
+    if (processJobType == "ongoing" && !cdrFlag) {
       val queryIngLogSuccess =
         s"""
     SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, target_schema_nm, target_table_nm, job_start_time, job_end_time, ictrl_dt, status
@@ -296,14 +415,13 @@ class IngestFw(override val schemaName: String,
                               JOB_TYPE: JobConstant.JOB_TYPE,jobName: String,
                               controlJobDf: Row,tblConfName: String,
                               httpServletRequest: HttpServletRequest,
-                              username: String): CompletableFuture[ExecuteResponse] = {
+                              username: String,roundTime: LocalDateTime): CompletableFuture[ExecuteResponse] = {
     val completableFuture: CompletableFuture[ExecuteResponse] = CompletableFuture.supplyAsync(new Supplier[ExecuteResponse] {
       override def get(): ExecuteResponse =  {
         {
           if (dependencyCheckModel.get_bldStartDate() == null) {
             dependencyCheckModel.set_bldStartDate(new Timestamp(System.currentTimeMillis()))
           }
-          val roundTime = LocalDateTime.now()
           if (dependencyCheckModel.getModuleNotebookName == null)
             dependencyCheckModel.setModuleNotebookName("zeppelin-se-uat-g")
           var masterRefDate: LocalDateTime = null
@@ -314,9 +432,14 @@ class IngestFw(override val schemaName: String,
           val catchUpType = JobConstant.CATCHUP_TYPE.SEQUENCE.getValue
           val ictrlDtTgtFmt = controlJobDf.getAs[String]("ictrl_dt_tgtfmt")
           val dateFormatIctrlDtForTb = convertPythonDateFormatToJava(ictrlDtTgtFmt)
+          val tableName = controlJobDf.getAs[String]("target_table_nm")
+          val loadType = controlJobDf.getAs[String]("load_type")
           val timeRetry = controlJobDf.getAs[Int]("time_retry")
           val totalRetry = controlJobDf.getAs[Int]("total_retry")
-          var currentDateRun = controlJobDf.getAs[Any]("last_success_ictrl_dt").toString
+          val schemaNameFromTbl = controlJobDf.getAs[String]("target_schema_nm")
+          var currentDateRun = controlJobDf.getAs[String]("last_success_ictrl_dt")
+          val lastSuccessIctrlDt = currentDateRun
+          var processJobType: String = "ongoing"
           var origRefDate: LocalDateTime = null
           if (dependencyCheckModel.getFixedDate == null || dependencyCheckModel.getFixedDate.isEmpty) {
             masterRefDate = minusDateByFrequency(dependencyCheckModel.get_bldStartDate().toLocalDateTime, frequency, backdate)
@@ -325,8 +448,9 @@ class IngestFw(override val schemaName: String,
           else {
             masterRefDate = parseToLocalDateTime(dependencyCheckModel.getFixedDate, dateFormatIctrlDtForTb).get
             origRefDate = dependencyCheckModel.get_bldStartDate().toLocalDateTime
+            processJobType = "manual"
           }
-          if (currentDateRun == null) {
+          if (currentDateRun == null || loadType.equals(LOAD_TYPE.FULL_LOAD.getValue)) {
             currentLocalDateRun = masterRefDate
             currentDateRun = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
           }
@@ -335,16 +459,24 @@ class IngestFw(override val schemaName: String,
             if (catchUpType.equals(CATCHUP_TYPE.SEQUENCE.getValue)) {
               currentLocalDateRun = addDateByFrequency(currentLocalDateRun, frequency)
             }
+            if(currentLocalDateRun.isAfter(masterRefDate)) {
+              currentLocalDateRun = masterRefDate
+            }
           }
           var isCdr: Boolean = false
           if (JOB_TYPE == JobConstant.JOB_TYPE.FILE) {
-            isCdr = controlJobDf.getAs[String]("cdr_flag").equals("Y")
+            isCdr = "Y".equalsIgnoreCase(controlJobDf.getAs[String]("cdr_flag"))
           }
           if (isCdr) {
             currentLocalDateRun = masterRefDate
           }
-          val startIctrlDt = currentLocalDateRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
-          val endIctrlDt = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
+          var startIctrlDt = currentLocalDateRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
+          var startRefDate = currentLocalDateRun
+          if(loadType.equals(LOAD_TYPE.UPSERT.getValue)) {
+            currentLocalDateRun = masterRefDate
+            currentDateRun =  masterRefDate.format(
+              DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
+          }
           val sb = new StringBuilder()
           var overlap: String = "0"
           if (JOB_TYPE != JobConstant.JOB_TYPE.KAFKA) {
@@ -383,27 +515,32 @@ class IngestFw(override val schemaName: String,
               else {
                 isContinueRunning = false
               }
-              val startDateWithOverlap = calOverLap(ictrlDtRun, overlap, frequency)
-              val startDateWithOverlapIctrlDt = startDateWithOverlap.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
               val refDateIctrlDt = ictrlDtRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
+              if(!loadType.equals(LOAD_TYPE.UPSERT.getValue)) {
+                startRefDate = ictrlDtRun
+                startIctrlDt = refDateIctrlDt
+              }
+              val startDateWithOverlap = calOverLap(startRefDate, overlap, frequency)
+              val startDateWithOverlapIctrlDt = startDateWithOverlap.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
               val runTime: LocalDateTime = LocalDateTime.now()
               insertRoundAuditLog(dependencyCheckModel,
                 controlJobDf.getAs[String]("target_schema_nm"), controlJobDf.getAs[String]("target_table_nm"),
-                runId, refDateIctrlDt, postgresConnectionInfo, runTime, startIctrlDt, endIctrlDt,
+                runId, refDateIctrlDt, postgresConnectionInfo, runTime, startDateWithOverlapIctrlDt, refDateIctrlDt,
                 roundTime,controlJobDf.getAs[String]("load_type"),controlJobDf.getAs[String]("ingestion_type"),
-                taskGroupName)
-//              checkRunningIctrlDtIngest(sparkSession, jobName,
-//                taskGroupName, refDateIctrlDt, roundTime, runTime, startIctrlDt,
-//                endIctrlDt, "ongoing", isCdr, runId, sparkSession.sparkContext.applicationId, postgresConnectionInfo,
-//                sparkSession)
+                taskGroupName,jobName)
+              checkRunningIctrlDtIngest(sparkSession, jobName,
+                taskGroupName, refDateIctrlDt, roundTime, runTime, startDateWithOverlapIctrlDt,
+                refDateIctrlDt, processJobType, isCdr, runId,
+                sparkSession.sparkContext.applicationId, postgresConnectionInfo, sparkSession)
               try {
+                var startDetailTime: LocalDateTime = LocalDateTime.now()
                 breakable {
                   for (i <- 0 to totalRetry) {
                     val queryMasterSourceSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = '${controlJobDf.getAs[String]("connector_source")}'"
                     val connectionInfo = ConnectionService.getMasterConfigLog(queryMasterSourceSql, salt, ultKey)
                     val results: java.util.Map[String, Boolean] =
                       checkDependencyByJobName(controlJobDf, ictrlDtRun, postgresConnectionInfo,
-                        refDateIctrlDt, currentDateRun, connectionInfo, jobName)
+                        refDateIctrlDt, currentDateRun, connectionInfo, jobName,null)
                     val notReadyJob: java.util.Set[String] = new java.util.HashSet[String]
                     val readyJob: java.util.Set[String] = new java.util.HashSet[String]
                     var hasNotReadyJob: Boolean = false
@@ -424,15 +561,24 @@ class IngestFw(override val schemaName: String,
                     Thread.sleep(timeRetry * 1000)
                   }
                 }
+                var stepRun = "FW CHECK PREREQUISITE"
+                var stepSeq = "FW:1"
+                var stepRunNext = "FW RUN SCRIPTS INGESTION"
+                var stepSeqNext = "FW:2"
+                insertAuditLogDetail(stepRun,stepSeq,jobName,runId,taskGroupName,schemaNameFromTbl,
+                  tableName,loadType,roundTime,startDetailTime,"SUCCESS",refDateIctrlDt,
+                  stepRunNext,stepSeqNext,postgresConnectionInfo,"tbl_ingest_audit_detail_logs",
+                  "tbl_ingest_audit_detail_next_logs")
+                startDetailTime = LocalDateTime.now()
                 val param: java.util.HashMap[String, JsonNode] = new util.HashMap[String, JsonNode]()
                 param.put("job_nm", objectMapper.valueToTree(jobName))
                 param.put("tasksgroup_nm", objectMapper.valueToTree(taskGroupName))
-                param.put("rl_ref_date", objectMapper.valueToTree(ictrlDtRun.toString))
+                param.put("rl_ref_date", objectMapper.valueToTree(ictrlDtRun.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS"))))
                 param.put("ictrl_dt", objectMapper.valueToTree(refDateIctrlDt))
                 param.put("start_ictrl_dt", objectMapper.valueToTree(startIctrlDt))
-                param.put("end_ictrl_dt", objectMapper.valueToTree(endIctrlDt))
+                param.put("end_ictrl_dt", objectMapper.valueToTree(refDateIctrlDt))
                 param.put("start_ictrl_dt_w_overlap", objectMapper.valueToTree(startDateWithOverlapIctrlDt))
-                param.put("end_ictrl_dt_w_overlap", objectMapper.valueToTree(endIctrlDt))
+                param.put("end_ictrl_dt_w_overlap", objectMapper.valueToTree(refDateIctrlDt))
                 if(controlJobDf.getAs[String]("ictrl_dt_type") != null)
                   param.put("ictrl_dt_type", objectMapper.valueToTree(controlJobDf.getAs[String]("ictrl_dt_type")))
                 else
@@ -460,13 +606,22 @@ class IngestFw(override val schemaName: String,
                     runId, sparkSession,
                     runNotebookParallelResult.getNotebookUrl, runTime,
                     LocalDateTime.now(), roundTime, postgresConnectionInfo, refDateIctrlDt, jobName,
-                    "tbl_trans_audit_logs", tblConfName)
+                    "tbl_ingest_audit_logs", tblConfName,lastSuccessIctrlDt)
                   throw new RunNotebookParallelException(runNotebookParallelResult.getErrorMsg)
                 }
+                status = "SUCCESS"
+                stepRun = "FW RUN SCRIPTS INGESTION"
+                stepSeq = "FW:2"
+                stepRunNext = null
+                stepSeqNext = null
+                insertAuditLogDetail(stepRun,stepSeq,jobName,runId,taskGroupName,schemaNameFromTbl,
+                  tableName,loadType,roundTime,startDetailTime,"SUCCESS",refDateIctrlDt,
+                  stepRunNext,stepSeqNext,postgresConnectionInfo,"tbl_ingest_audit_detail_logs",
+                  "tbl_ingest_audit_detail_next_logs")
                 postProcess(status, dependencyCheckModel, runNotebookParallelResult.getErrorSpecificMsg,
                   runId, sparkSession, runNotebookParallelResult.getNotebookUrl, runTime,
                   LocalDateTime.now(), roundTime, postgresConnectionInfo, refDateIctrlDt, jobName,
-                  "tbl_trans_audit_logs", tblConfName)
+                  "tbl_ingest_audit_logs", tblConfName,lastSuccessIctrlDt)
                 sb.append(runNotebookParallelResult.getMessage)
                 if (catchUpType.equalsIgnoreCase(CATCHUP_TYPE.SEQUENCE.getValue)) {
                   currentLocalDateRun = addDateByFrequency(currentLocalDateRun, frequency)
@@ -502,8 +657,8 @@ class IngestFw(override val schemaName: String,
                           ictrlDt:String,connectionInfo: ConnectionInfo,jobStartTime: LocalDateTime,
                           startIctrlDt:String,endIctrlDt: String,
                           roundTime: LocalDateTime,loadType:String,ingestType:String,
-                          taskGroupName:String): Unit = {
-    val seqValue = Seq(dependencyCheckModel.getJobName,roundTime,runId,
+                          taskGroupName:String,jobName:String): Unit = {
+    val seqValue = Seq(jobName,roundTime,runId,
       schemaName,tableName,jobStartTime,ictrlDt,startIctrlDt,endIctrlDt,
       dependencyCheckModel.getModuleNotebookName,loadType,ingestType,taskGroupName)
     val sql = f"insert into ${this.schemaName}.tbl_ingest_audit_logs (job_nm,round_time," +
@@ -604,6 +759,7 @@ class IngestFw(override val schemaName: String,
   }
 
   def oracleIngestionQueryLog(spark: SparkSession, server: String, port: String, username: String, password: String, query_string: String, sid: String): DataFrame = {
+    logger.info("oracle url = {}",s"jdbc:oracle:thin:@$server:$port/$sid")
     try {
       val spdf = spark.read.format("jdbc")
         .option("url", s"jdbc:oracle:thin:@$server:$port/$sid")
@@ -738,7 +894,8 @@ class IngestFw(override val schemaName: String,
           val targetDate = masterRefDate.format(DateTimeFormatter.ofPattern(patternIctrlDtCheck))
           val query = s"$baseQuery and ictrl_dt like '$targetDate%' order by job_start_time desc"
 
-          if (checkInDate == "logs" && prerequisiteJobNameStr.nonEmpty) {
+          if (checkInDate == "logs" && (prerequisiteJobNm.isInstanceOf[String] &&
+            prerequisiteJobNameStr != null && !blackListNullString.contains(prerequisiteJobNameStr))) {
             val result = ConnectionService.postgresqlQueryDirectly(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
               postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm,
               postgresConnectionInfo.getPassword,query)
@@ -808,8 +965,22 @@ class IngestFw(override val schemaName: String,
                  |) TD
                  |WHERE rownum = 1
                  |""".stripMargin
-            val result = oracleIngestionQueryLog(sparkSession,depenIp, depenPort, depenUserNm, depenPassword, dbDailyQuery, depenSid).collect()
-            checkExistsDataWithOutCheckMiss(result,targetDate,prerequisiteJobNameStr,emptyFlag,prerequisiteTableCleaned)
+            logger.info("sql = {}",dbDailyQuery)
+            val records = oracleIngestionQueryLog(sparkSession,depenIp, depenPort, depenUserNm, depenPassword, dbDailyQuery, depenSid).collect()
+            if (records.nonEmpty) {
+              for (record <- records) {
+                // Access columns by index (0-based)
+                val sourceObject = record.getString(0)
+                val trigger = record.getDecimal(2)
+
+                val isReadyDepen = sourceObject.equalsIgnoreCase(prerequisiteTable) && trigger.intValue() == 1
+
+                return (isReadyDepen, Map(prerequisiteJobNameStr -> List(targetDate)))
+              }
+              (false,Map(prerequisiteJobNameStr -> List(targetDate)))
+            } else {
+              (false, Map(prerequisiteJobNameStr -> List(targetDate)))
+            }
           }
 
         case "hourly" =>
@@ -942,26 +1113,55 @@ class IngestFw(override val schemaName: String,
   }
 
   override def checkDependencyByJobName(controlJobDf: Row,
-                                        masterRefDate: LocalDateTime,connectionInfo: ConnectionInfo,
+                                        masterRefDate: LocalDateTime,postgresConnectionInfo: ConnectionInfo,
                                         refDateIctrlDt: String, startICtrlDt: String,
-                                        postgresConnectionInfo: ConnectionInfo,jobName:String): java.util.Map[String,Boolean] = {
-    val df = sparkSession.sql(s"select * from $schemaName.tbl_job_dependency where " +
+                                        connectionInfo: ConnectionInfo,jobName:String,
+                                        schemaMap: mutable.Map[String,String]): java.util.Map[String,Boolean] = {
+    var df = ConnectionService.postgresqlQueryDirectly(
+      postgresConnectionInfo.getIp,postgresConnectionInfo.getPort,
+      postgresConnectionInfo.getDbName,postgresConnectionInfo.getUserNm,postgresConnectionInfo.getPassword
+      ,s"select * from $schemaName.tbl_job_dependency where " +
       s"job_nm = '$jobName' and UPPER(active_flag) = 'Y'")
     val returnJobMap = new java.util.HashMap[String,Boolean]()
-    df.collect().foreach(r => {
-      var preReqSchemaNm = r.getAs[String]("prerequisite_schema_nm")
-      if(!schemaName.endsWith("_uat")) {
-        preReqSchemaNm = preReqSchemaNm.replace("_uat","")
-      }
-      val map = checkLogIngestion(r.getAs[String]("prerequisite_job_nm"),preReqSchemaNm,
-        r.getAs[String]("prerequisite_table_nm"),r.getAs[String]("frequency_check"),
-        Some(r.getAs[String]("value")),r.getAs[Int]("empty_flag"),r.getAs[String]("data_column"),
-        r.getAs[String]("ictrl_dt_tgtfmt"),controlJobDf.getAs[String]("ictrl_dt_tgtfmt"),
-        masterRefDate,f"$schemaName.tbl_ingest_audit_logs",connectionInfo.getIp,connectionInfo.getPort,
-        connectionInfo.getUserNm,connectionInfo.getPassword,connectionInfo.getSid,
+    val processResult = processResultSetWithSingleLoop(df.rs)
+    df.close()
+    if(processResult._1) {
+      val r = processResult._3.get
+      var preReqSchemaNm = r.prerequisiteSchemaNm
+      val map = checkLogIngestion(processResult._2, preReqSchemaNm,
+        r.prerequisiteTableNm, r.frequencyCheck,
+        Some(r.value), r.emptyFlag, r.dataColumn,
+        convertPythonDateFormatToJava(r.ictrlDtTgtfmt), convertPythonDateFormatToJava(controlJobDf.getAs[String]("ictrl_dt_tgtfmt")),
+        masterRefDate, f"$schemaName.tbl_ingest_audit_logs", connectionInfo.getIp, connectionInfo.getPort,
+        connectionInfo.getUserNm, connectionInfo.getPassword, connectionInfo.getSid,
         postgresConnectionInfo)
-      returnJobMap.put(r.getAs[String]("prerequisite_job_nm"),map._1)
-    })
+      returnJobMap.put(r.prerequisiteJobNm, map._1)
+    }
+    else {
+      df = ConnectionService.postgresqlQueryDirectly(
+        postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
+        postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm, postgresConnectionInfo.getPassword
+        , s"select * from $schemaName.tbl_job_dependency where " +
+          s"job_nm = '$jobName' and UPPER(active_flag) = 'Y'")
+      try {
+        while (df.rs.next()) {
+          val r = df.rs
+          val preReqSchemaNm = r.getString("prerequisite_schema_nm")
+          val map = checkLogIngestion(r.getString("prerequisite_job_nm"), preReqSchemaNm,
+            r.getString("prerequisite_table_nm"), r.getString("frequency_check"),
+            Some(r.getString("value")), r.getInt("empty_flag"), r.getString("data_column"),
+            convertPythonDateFormatToJava(r.getString("ictrl_dt_tgtfmt")),
+            convertPythonDateFormatToJava(controlJobDf.getAs[String]("ictrl_dt_tgtfmt")),
+            masterRefDate, "tbl_ingest_logs", connectionInfo.getIp,
+            connectionInfo.getPort, connectionInfo.getUserNm, connectionInfo.getPassword,
+            connectionInfo.getSid, postgresConnectionInfo)
+          returnJobMap.put(r.getString("prerequisite_job_nm"), map._1)
+        }
+      }
+      finally {
+        df.close()
+      }
+    }
     returnJobMap
   }
 }

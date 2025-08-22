@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.gable.templar.constant.JobConstant
 import com.gable.templar.constant.JobConstant.{JOB_TYPE, importParameter, initialTitle, manualTitle}
-import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse, NotebookCheckParallelRequest, NotebookIdAddParameterRequest, NotebookRunParallelRequest, NotebookRunParallelResponse, RunNotebookParallelResult}
+import com.gable.templar.custom.view.{AirflowModelView, DependencyCheckModel, ExecuteResponse, NotebookCheckParallelRequest, NotebookIdAddParameterRequest, NotebookRunParallelRequest, NotebookRunParallelResponse, RunNotebookParallelResult}
 import com.gable.templar.exception.DropDuplicatesJobError
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.heaven.util.{HTTPServletRequestUtil, RestTemplateFactoryUtil}
@@ -17,12 +17,13 @@ import org.springframework.core.task.TaskExecutor
 import org.springframework.web.context.request.{RequestContextHolder, ServletRequestAttributes}
 
 import java.sql.{DriverManager, ResultSet, ResultSetMetaData, Timestamp, Types}
-import java.time.{Duration, LocalDate, LocalDateTime}
+import java.time.{Duration, LocalDate, LocalDateTime, YearMonth}
 import java.time.format.{DateTimeFormatter, DateTimeParseException}
 import java.time.temporal.ChronoUnit
 import java.util
-import java.util.concurrent.{CompletableFuture, Future}
+import java.util.concurrent.{CompletableFuture, Future, Semaphore}
 import javax.servlet.http.HttpServletRequest
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.util.{Failure, Success, Try}
 
@@ -42,6 +43,8 @@ trait CustomFw {
   val sparkSession: SparkSession
 
   val HOURS_CHECK_ROUND_TIME = 3
+
+  val CONCURRENT_SCHEDULE = 4
 
 
   var tmpzSchema: String = {
@@ -66,12 +69,13 @@ trait CustomFw {
   def doRunFramework(dependencyCheckModel: DependencyCheckModel,
                      JOB_TYPE: JOB_TYPE, jobName: String, controlJobDf: Row,
                      tblConfName: String, httpServletRequest: HttpServletRequest,
-                     username: String): CompletableFuture[ExecuteResponse]
+                     username: String,roundTime: LocalDateTime): CompletableFuture[ExecuteResponse]
 
   def checkDependencyByJobName(controlJobDf: Row,
                                masterRefDate: LocalDateTime, connectionInfo: ConnectionInfo,
                                refDateIctrlDt: String, startICtrlDt: String,
-                               postgresConnectionInfo: ConnectionInfo, jobName: String): java.util.Map[String, Boolean]
+                               postgresConnectionInfo: ConnectionInfo, jobName: String,
+                               schemaMap:mutable.Map[String,String]): java.util.Map[String, Boolean]
 
   def parseToLocalDateTime(input: String, format: String): Option[LocalDateTime] = {
     try {
@@ -81,19 +85,41 @@ trait CustomFw {
         try {
           try {
             // Try parsing as LocalDate, then convert
-            val date = LocalDate.parse(input, DateTimeFormatter.ofPattern(format))
+            var date: LocalDate = null
+            if(input.length < 8) {
+              date = YearMonth.parse(input,DateTimeFormatter.ofPattern(format)).atDay(1)
+            }
+            else {
+              date = LocalDate.parse(input, DateTimeFormatter.ofPattern(format))
+            }
             Some(date.atStartOfDay())
           } catch {
-            case _: DateTimeParseException => None
+            case d: DateTimeParseException => {
+              logger.error(d.getMessage,d)
+              throw new InvalidArgumentException("cannot parse date time")
+            }
           }
         }
     }
   }
 
+  def getSequenceAndJob(rows: Array[Row]): mutable.TreeMap[Int,Array[Row]] = {
+    val jobMap: mutable.TreeMap[Int,Array[Row]] = mutable.TreeMap.empty
+    rows.foreach(r => {
+      var resultRow = jobMap.get(r.getAs[Int]("sequence")).orNull
+      if(resultRow == null) {
+        resultRow = Array.empty
+      }
+      resultRow = resultRow :+ r
+      jobMap.put(r.getAs[Int]("sequence"),resultRow)
+    })
+    jobMap
+  }
+
   def getTblConfNameByJobType(jobType: JOB_TYPE): String = {
     jobType match {
       case JOB_TYPE.FILE => {
-        JobConstant.tableNmApiIngestion
+        JobConstant.tableNmFileIngestion
       }
       case JOB_TYPE.KAFKA => {
         JobConstant.tableNmKafkaIngestion
@@ -179,35 +205,66 @@ trait CustomFw {
     val tblConfName = getTblConfNameByJobType(jobType)
     val queryMasterSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = 'fw_postgre'"
     val postgresConnectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql, salt, ultKey)
+    val roundTime = LocalDateTime.now()
     val httpServletRequest = RequestContextHolder.getRequestAttributes.asInstanceOf[ServletRequestAttributes].getRequest
-    if (dependencyCheckModel.getTaskGroupName != null && dependencyCheckModel.getJobName == null) {
+    if (dependencyCheckModel.getTaskGroupName != null) {
+      val airflowModelView = RestTemplateFactoryUtil.getRestTemplar(
+        HTTPServletRequestUtil.getToken(httpServletRequest),true).getForObject(
+        heraUrl + "/private/airflow/getAll/workflow/" + dependencyCheckModel.
+          get_workflowId(),classOf[AirflowModelView])
+      val taskStartTime = LocalDateTime.now()
       val executeResult = new util.ArrayList[ExecuteResponse]()
       val query =
         f"""select *
            |from ${schemaName}.$tblConfName
            |where lower(tasksgroup_nm) = lower('${dependencyCheckModel.getTaskGroupName}') and lower(active_flag) = lower('Y')""".stripMargin
+      insertTaskgroupLogs(dependencyCheckModel.getTaskGroupName,taskStartTime,roundTime,
+        dependencyCheckModel.getModuleNotebookName,postgresConnectionInfo,airflowModelView.getDagName)
       val taskGroupConnection = ConnectionService.postgresqlQueryDirectly(
         postgresConnectionInfo.getIp,postgresConnectionInfo.getPort,
         postgresConnectionInfo.getDbName,postgresConnectionInfo.getUserNm,
         postgresConnectionInfo.getPassword,query)
-      val completableFutureList = ArrayBuffer[CompletableFuture[ExecuteResponse]]()
+      val limiter = new Semaphore(CONCURRENT_SCHEDULE, true)
       try {
         val taskGroupDf = rsToDataFrame(taskGroupConnection.rs, sparkSession)
-        taskGroupDf.foreach(r => {
-          val executeResponse = new ExecuteResponse
-          executeResponse.setJobName(r.getAs[String]("job_nm"))
-          completableFutureList += doRunFramework(dependencyCheckModel,
-            jobType, r.getAs[String]("job_nm"), r, tblConfName, httpServletRequest, loginUser.getUsername)
-          executeResult.add(executeResponse)
+        val jobMap = getSequenceAndJob(taskGroupDf)
+        jobMap.foreach(j => {
+          val completableFutureList = ArrayBuffer[CompletableFuture[ExecuteResponse]]()
+          j._2.foreach(r => {
+            val executeResponse = new ExecuteResponse
+            executeResponse.setJobName(r.getAs[String]("job_nm"))
+            limiter.acquire()
+            val cf = doRunFramework(dependencyCheckModel,
+              jobType, r.getAs[String]("job_nm"), r, tblConfName, httpServletRequest, loginUser.getUsername,roundTime)
+            cf.whenComplete((_, _) => limiter.release())
+            completableFutureList += cf
+            executeResult.add(executeResponse)
+          })
+          val allOf = CompletableFuture.allOf(completableFutureList: _*)
+          allOf.join()
+          val errorMsg = new StringBuilder
+          var isFailed = false
+          for (completableFuture <- completableFutureList) {
+            try {
+              executeResult.add(completableFuture.get())
+            }
+            catch {
+              case exception: Exception => {
+                logger.error(exception.getMessage,exception)
+                isFailed = true
+                errorMsg.append(exception.getMessage)
+              }
+            }
+            if(isFailed) {
+              updateTaskgroupLogs(dependencyCheckModel.getTaskGroupName,taskStartTime,roundTime,"FAILED",postgresConnectionInfo)
+              throw new Exception(errorMsg.toString())
+            }
+          }
         })
+        updateTaskgroupLogs(dependencyCheckModel.getTaskGroupName,taskStartTime,roundTime,"SUCCESS",postgresConnectionInfo)
       }
       finally{
         taskGroupConnection.close()
-      }
-      val allOf = CompletableFuture.allOf(completableFutureList: _*)
-      allOf.join()
-      for (completableFuture <- completableFutureList) {
-        executeResult.add(completableFuture.get())
       }
       executeResult
     }
@@ -231,7 +288,7 @@ trait CustomFw {
       executeResult.add(CompletableFuture.completedFuture(
         doRunFramework(dependencyCheckModel, jobType,
           row.getAs[String]("job_nm"), row, tblConfName,
-          httpServletRequest, loginUser.getUsername)).get().get())
+          httpServletRequest, loginUser.getUsername,roundTime)).get().get())
       executeResult
     }
   }
@@ -255,7 +312,7 @@ trait CustomFw {
                   jobStartTime: LocalDateTime, jobEndTime: LocalDateTime,
                   refDate: LocalDateTime, connectionInfo: ConnectionInfo,
                   ictrlDt: String, jobName: String, tblLogName: String,
-                  tblConfName: String): Unit = {
+                  tblConfName: String,lastSuccessIctrlDt: String): Unit = {
     val duration = Duration.between(jobStartTime, jobEndTime)
     val rowCount = sparkSession.table(f"$tmpzSchema.${jobName}_tmp_validation").count()
     val hours = duration.toHours
@@ -263,14 +320,15 @@ trait CustomFw {
     val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
     val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
     val params = Seq(status, errorMsg, rowCount, logUrl,
-      durationString, jobName, runId, refDate)
+      durationString,jobEndTime, jobName, runId, ictrlDt, refDate)
     val sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
-      f"err_msg = ?, row_cnt = ?, log_url = ?, duration = ? " +
-      f"where job_nm = ? and dag_run_id = ? " +
+      f"err_msg = ?, row_cnt = ?, log_url = ?, duration = ?,job_end_time = ? " +
+      f"where job_nm = ? and dag_run_id = ? and ictrl_dt = ? " +
       f"and round_time = ?"
-    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,
+      connectionInfo.getPort, connectionInfo.getDbName,
       connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
-    if (status.equals("SUCCESS")) {
+    if (status.equals("SUCCESS") && (lastSuccessIctrlDt == null || lastSuccessIctrlDt.toInt < ictrlDt.toInt)) {
       val sql = s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
         s"where job_nm = '${jobName}'"
       ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
@@ -313,10 +371,13 @@ trait CustomFw {
     var notebookUrl = ""
     var timeSleep: Long = 0L
     if (dependencyCheckModel.getTimeSleep == null) {
-      timeSleep = 15L
+      timeSleep = 30L
     }
     else {
       timeSleep = dependencyCheckModel.getTimeSleep
+      if(timeSleep < 30L) {
+        timeSleep = 30L
+      }
     }
     while (!notebookList.isEmpty) {
       Thread.sleep(timeSleep * 1000)
@@ -610,7 +671,11 @@ trait CustomFw {
   }
 
   def convertPythonDateFormatToJava(pythonPattern: String): String = {
-    pythonPattern
+    var pythonPatternTemp = pythonPattern
+    if(pythonPatternTemp == null) {
+      pythonPatternTemp = "%Y%m%d"
+    }
+    pythonPatternTemp
       .replace("%Y", "yyyy")
       .replace("%m", "MM")
       .replace("%d", "dd")
@@ -707,6 +772,87 @@ trait CustomFw {
         logger.info("Table is not ready.")
         (false, Map(prerequisiteJobNameStr -> findMiss.toList))
       }
+    }
+  }
+
+  def updateTaskgroupLogs(tasksgroupNm:String,
+                          taskStartTime: LocalDateTime,roundTime: LocalDateTime,
+                          status: String,connectionInfo: ConnectionInfo): Unit = {
+    val nmTaskgroupLogs = s"$schemaName.tbl_tasksgroup_logs"
+    val taskEndTime = LocalDateTime.now()
+    val duration = Duration.between(taskStartTime, taskEndTime)
+    val hours = duration.toHours
+    val minutes = duration.minusHours(hours).toMinutes
+    val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
+    val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
+    val params = Seq(taskEndTime,durationString,status,tasksgroupNm,roundTime)
+    val updateQueryLogs = s"UPDATE $nmTaskgroupLogs set task_end_time = " +
+      s"?, duration = ?, status = ? where tasksgroup_nm = ? and round_time = ?"
+    ConnectionService.postgresqlInsertUpdateFunc(
+      connectionInfo.getIp,
+      connectionInfo.getPort,
+      connectionInfo.getDbName,
+      connectionInfo.getUserNm,
+      connectionInfo.getPassword,
+      updateQueryLogs,
+      params
+    )
+  }
+
+  def insertTaskgroupLogs(tasksgroupNm: String,
+                          taskStartTime: LocalDateTime,
+                          roundTime: LocalDateTime,
+                          zeppelinName: String,
+                          connectionInfo: ConnectionInfo,
+                          workflowName: String
+                         ): Unit = {
+
+    val nmTaskgroupLogs = s"$schemaName.tbl_tasksgroup_logs"
+    val status = "RUNNING"
+    val baseZeppelin = zeppelinName
+    val params = Seq(tasksgroupNm,workflowName,roundTime,taskStartTime,status,baseZeppelin)
+    val queryInsertLog = s"""
+    INSERT INTO $nmTaskgroupLogs (tasksgroup_nm,workflow_nm, round_time, task_start_time, task_end_time, duration, status, zeppelin)
+    VALUES (?, ?, ?, ?, null, null, ?, ?)
+  """
+
+    ConnectionService.postgresqlInsertUpdateFunc(
+      connectionInfo.getIp,
+      connectionInfo.getPort,
+      connectionInfo.getDbName,
+      connectionInfo.getUserNm,
+      connectionInfo.getPassword,
+      queryInsertLog,
+      params
+    )
+  }
+
+  def insertAuditLogDetail(stepRun:String,stepSeq:String,jobName: String,
+                           dagRunId: String, tasksGroupNm: String,schemaName: String,
+                           tableName: String,loadType: String,roundTime:LocalDateTime,
+                           detailStartTime: LocalDateTime,status: String,ictrlDt: String,
+                           stepRunNext:String,stepSeqNext:String,
+                           connectionInfo: ConnectionInfo,auditLogDetail: String,
+                           auditLogDetailNext: String): Unit = {
+    val detailEndTime = LocalDateTime.now()
+    val duration = Duration.between(detailStartTime, detailEndTime)
+    val hours = duration.toHours
+    val minutes = duration.minusHours(hours).toMinutes
+    val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
+    val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
+    val sql = s"""INSERT INTO ${this.schemaName}.$auditLogDetail (job_nm,tasksgroup_nm,round_time,dag_run_id,schema_nm,table_nm,load_type,job_start_time,job_end_time,duration,ictrl_dt,step_run,step_seq,status,err_msg)
+                 |                VALUES ('${jobName}','${tasksGroupNm}','${roundTime}','${dagRunId}'
+                 |                ,'${schemaName}','${tableName}','${loadType}','${detailStartTime}','${detailEndTime}',
+                 |                '${durationString}','${ictrlDt}','${stepRun}','${stepSeq}','${status}','-')""".stripMargin
+    ConnectionService.postgresqlInsertUpdateFunc(
+      connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
+      connectionInfo.getUserNm,connectionInfo.getPassword,sql,Seq.empty)
+    if((stepRunNext != null && stepRunNext == "") || (stepSeqNext != null && stepSeqNext == "")) {
+      val queryInsertLog = s"""INSERT INTO ${this.schemaName}.$auditLogDetailNext (job_nm,tasksgroup_nm,round_time,job_start_time,ictrl_dt,step_run,step_seq)
+                              |                    VALUES ('${jobName}', '${tasksGroupNm}', '${roundTime}', '${detailStartTime}', '${ictrlDt}', '${stepRunNext}','${stepSeqNext}')""".stripMargin
+      ConnectionService.postgresqlInsertUpdateFunc(
+        connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
+        connectionInfo.getUserNm,connectionInfo.getPassword,queryInsertLog,Seq.empty)
     }
   }
 
