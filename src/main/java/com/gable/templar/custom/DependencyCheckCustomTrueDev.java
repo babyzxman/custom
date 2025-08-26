@@ -40,10 +40,10 @@ public class DependencyCheckCustomTrueDev  extends DefaultCustomService<Dependen
     void init() {
         transformFw = new TransformFw("fwconfz_truedev",
                 heraConfig.getHeraUrl(),loginUser, SparkServer.getZeusSession().session(),
-                taskExecutor);
+                NewThreadExecutor.threadExecutor);
         ingestFw =  new IngestFw("fwconfz_truedev",
                 heraConfig.getHeraUrl(),loginUser, SparkServer.getZeusSession().session(),
-                taskExecutor);
+                NewThreadExecutor.threadExecutor);
     }
 
 

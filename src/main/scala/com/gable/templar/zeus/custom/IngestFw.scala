@@ -133,7 +133,7 @@ class IngestFw(override val schemaName: String,
   }
 
 
-  override def postProcess(status: String,
+  def postProcess(status: String,
                            dependencyCheckModel: DependencyCheckModel,
                            errorMsg: String,
                            runId: String, sparkSession: SparkSession, logUrl: String,
@@ -184,12 +184,11 @@ class IngestFw(override val schemaName: String,
     }
   }
 
-  def checkRunningIctrlDtIngest(
-                                 spark: SparkSession, jobNmUpdate: String, tasksgroupNmUpdate: String,
+  def checkRunningIctrlDtIngest(jobNmUpdate: String, tasksgroupNmUpdate: String,
                                  ictrlDtUpdate: String, roundTime: LocalDateTime, jobStartTimeUpdate: LocalDateTime,
-                                 startIctrlDtStrUpdate: String, endIctrlDtStrUpdate: String, processJobType: String = "manual",
+                                 startIctrlDtStrUpdate: String, endIctrlDtStrUpdate: String, processJobType: String,
                                  cdrFlag: Boolean = false, dagRunId: String, appIdUpdate: String,
-                                 connectionInfo: ConnectionInfo,sparkSession: SparkSession): Unit = {
+                                 connectionInfo: ConnectionInfo): Unit = {
 
 
     println(s"Running time to check log: ${LocalDateTime.now()}")
@@ -319,14 +318,16 @@ class IngestFw(override val schemaName: String,
 
     // More Codition Check SUCCEED Log
     if (processJobType == "ongoing" && !cdrFlag) {
+      logger.info("test ongoing job logs")
       val queryIngLogSuccess =
         s"""
     SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, target_schema_nm, target_table_nm, job_start_time, job_end_time, ictrl_dt, status
     FROM $ingestAuditLogsTable
-    WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroupNm) = lower('$tasksgroupNmUpdate') AND ictrl_dt = '$ictrlDtUpdate' AND status = 'SUCCEED' AND err_msg = '-'
+    WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroup_nm) = lower('$tasksgroupNmUpdate') AND ictrl_dt = '$ictrlDtUpdate' AND status = 'SUCCEED' AND err_msg = '-'
     ORDER BY round_time DESC
     LIMIT 1
     """
+      logger.info("check query ing log success = {}",queryIngLogSuccess)
       val dfResultLogSuccess = ConnectionService.postgresqlQueryDirectly(
         connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
         connectionInfo.getUserNm, connectionInfo.getPassword, queryIngLogSuccess)
@@ -419,9 +420,7 @@ class IngestFw(override val schemaName: String,
     val completableFuture: CompletableFuture[ExecuteResponse] = CompletableFuture.supplyAsync(new Supplier[ExecuteResponse] {
       override def get(): ExecuteResponse =  {
         {
-          if (dependencyCheckModel.get_bldStartDate() == null) {
-            dependencyCheckModel.set_bldStartDate(new Timestamp(System.currentTimeMillis()))
-          }
+          dependencyCheckModel.set_bldStartDate(new Timestamp(System.currentTimeMillis()))
           if (dependencyCheckModel.getModuleNotebookName == null)
             dependencyCheckModel.setModuleNotebookName("zeppelin-se-uat-g")
           var masterRefDate: LocalDateTime = null
@@ -457,11 +456,14 @@ class IngestFw(override val schemaName: String,
           else {
             currentLocalDateRun = parseToLocalDateTime(currentDateRun, dateFormatIctrlDtForTb).get
             if (catchUpType.equals(CATCHUP_TYPE.SEQUENCE.getValue)) {
+              logger.info("check increase value")
               currentLocalDateRun = addDateByFrequency(currentLocalDateRun, frequency)
+              logger.info("check after increase current local date = {}",currentLocalDateRun);
             }
             if(currentLocalDateRun.isAfter(masterRefDate)) {
               currentLocalDateRun = masterRefDate
             }
+            logger.info("check current local date run = {}",currentLocalDateRun)
           }
           var isCdr: Boolean = false
           if (JOB_TYPE == JobConstant.JOB_TYPE.FILE) {
@@ -497,7 +499,7 @@ class IngestFw(override val schemaName: String,
             while (isContinueRunning) {
               var runId = ""
               if (dependencyCheckModel.get_workflowId() != null) {
-                runId = dependencyCheckModel.get_workflowId() + "||" + dependencyCheckModel.get_runId() + "||" + dependencyCheckModel.get_taskId()
+                runId = dependencyCheckModel.get_workflowId() + "|" + dependencyCheckModel.get_runId() + "|" + dependencyCheckModel.get_taskId()
               }
               else {
                 runId = "manual_run_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HH_mm_ss"))
@@ -528,11 +530,11 @@ class IngestFw(override val schemaName: String,
                 runId, refDateIctrlDt, postgresConnectionInfo, runTime, startDateWithOverlapIctrlDt, refDateIctrlDt,
                 roundTime,controlJobDf.getAs[String]("load_type"),controlJobDf.getAs[String]("ingestion_type"),
                 taskGroupName,jobName)
-              checkRunningIctrlDtIngest(sparkSession, jobName,
-                taskGroupName, refDateIctrlDt, roundTime, runTime, startDateWithOverlapIctrlDt,
-                refDateIctrlDt, processJobType, isCdr, runId,
-                sparkSession.sparkContext.applicationId, postgresConnectionInfo, sparkSession)
               try {
+                checkRunningIctrlDtIngest(jobName,
+                  taskGroupName, refDateIctrlDt, roundTime, runTime, startDateWithOverlapIctrlDt,
+                  refDateIctrlDt, processJobType, isCdr, runId,
+                  sparkSession.sparkContext.applicationId, postgresConnectionInfo)
                 var startDetailTime: LocalDateTime = LocalDateTime.now()
                 breakable {
                   for (i <- 0 to totalRetry) {
@@ -609,13 +611,13 @@ class IngestFw(override val schemaName: String,
                     "tbl_ingest_audit_logs", tblConfName,lastSuccessIctrlDt)
                   throw new RunNotebookParallelException(runNotebookParallelResult.getErrorMsg)
                 }
-                status = "SUCCESS"
+                status = "SUCCEED"
                 stepRun = "FW RUN SCRIPTS INGESTION"
                 stepSeq = "FW:2"
                 stepRunNext = null
                 stepSeqNext = null
                 insertAuditLogDetail(stepRun,stepSeq,jobName,runId,taskGroupName,schemaNameFromTbl,
-                  tableName,loadType,roundTime,startDetailTime,"SUCCESS",refDateIctrlDt,
+                  tableName,loadType,roundTime,startDetailTime,"SUCCEED",refDateIctrlDt,
                   stepRunNext,stepSeqNext,postgresConnectionInfo,"tbl_ingest_audit_detail_logs",
                   "tbl_ingest_audit_detail_next_logs")
                 postProcess(status, dependencyCheckModel, runNotebookParallelResult.getErrorSpecificMsg,
@@ -637,7 +639,7 @@ class IngestFw(override val schemaName: String,
                     updateStateOfAuditLogByJobNameAndRoundTimeAndDagRun(
                       "FAILED",
                       dependencyCheckModel,runId,LocalDateTime.now(),
-                      roundTime,postgresConnectionInfo,exception.getMessage,"tbl_trans_audit_logs")
+                      roundTime,postgresConnectionInfo,exception.getMessage,"tbl_ingest_audit_logs",jobName)
                   }
                   throw new Exception(exception.getMessage)
                 }
@@ -778,6 +780,78 @@ class IngestFw(override val schemaName: String,
     }
   }
 
+  def queryOracle(prerequisiteJobNameStr: String, patternIctrlDtCheck: String,
+                  prerequisiteTableCleaned: String,prerequisiteSchema: String,
+                  targetDate: String, depenIp: String, depenPort: String,
+                  depenUserNm: String, depenPassword: String, depenSid: String,
+                  prerequisiteTable: String): (Boolean, Map[String, List[String]]) = {
+    val conditionWhereJobNm = if (prerequisiteJobNameStr.isEmpty) "" else s"AND WORKFLOW_NM IN ('$prerequisiteJobNameStr')"
+    val targetFormatDate = convertPythonToPysparkFormat(patternIctrlDtCheck)
+    val dbDailyQuery =
+      s"""
+         |with INFORMATICA_DELTA
+         |as (select distinct FOLDER_NM,WORKFLOW_NM,TGT_OBJ
+         |   from TEDWAUXAPPO.AUX_DELTA
+         |   where OBS_IND = 0 AND TGT_OBJ = UPPER('$prerequisiteTableCleaned')
+         |   AND WORKFLOW_TYPE NOT IN ('EXP_TO_DATAMART','MANUAL')
+         |   AND WORKFLOW_NM not in ( 'WF_DIM_ORDR_ACTVTN_UPDATE_HRCHY','WF_DIM_ACCT_SAP_MAN') $conditionWhereJobNm
+         |   AND DECODE( FOLDER_NM
+         |     , '@ANA_SHARE', 'TEDWANAAPPO'
+         |     , '@AUX_SHARE', 'TEDWAUXAPPO'
+         |     , '@CDS_SHARE', 'CDSAPPO'
+         |     , '@CHNLMGMT_SHARE', 'CHNLMGMTAPPO'
+         |     , '@CLM_SHARE', 'CLMAPPO'
+         |     , '@COMM_SHARE', 'COMMONAPPO'
+         |     , '@CORP_SHARE', 'CORPAPPO'
+         |     , '@DDA_SHARE', 'DDAACSAPPO'
+         |     , '@DMT_SHARE_DMT', 'TEDWDMTAPPO'
+         |     , '@DMT_SHARE_TDA', 'TEDWTDAAPPO'
+         |     , '@DTH_SHARE', 'TAMBOLAPPO'
+         |     , '@EDW_SHARE_ACS', 'TEDWACSAPPO'
+         |     , '@EDW_SHARE_BI', 'TEDWBIAPPO'
+         |     , '@EDW_SHARE_CIS', 'TEDWCISAPPO'
+         |     , '@EDW_SHARE_DWH', 'TEDWDWHAPPO'
+         |     , '@EDW_SHARE_IMG', 'TEDWIMGAPPO'
+         |     , '@EDW_SHARE_LOG', 'TSIDLOGAPPO'
+         |     , '@EDW_SHARE_MMONEY', 'MMONEYAPPO'
+         |     , '@EDW_SHARE_STAGING', 'STAGING'
+         |     , '@EDW_SHARE_STG', 'TEDWSTGAPPO'
+         |     , '@EDW_SHARE_STGAPPO', 'TEDWSTGAPPO'
+         |     , '@FIN_SHARE', 'FIN1SBOX'
+         |     , '@GEOSPC_SHARE', 'GEOSPCAPPO'
+         |     , '@IOT_SHARE', 'IOTAPPO'
+         |     , '@PRODPERF_SHARE', 'PRODPERFAPPO'
+         |   ) = UPPER('$prerequisiteSchema'))
+         |SELECT *
+         |FROM (select TGT_OBJ as SOURCE_OBJECT,WORKFLOW_NM,
+         |   NVL((select distinct 1
+         |   from TEDWAUXAPPO.AUX_PROCESS_HIST
+         |   where to_date('$targetDate','$targetFormatDate') <= trunc(XTR_END_DT) and STAT = 'Succeeded'
+         |   and FOLDER_NM = TD.FOLDER_NM and WORKFLOW_NM = TD.WORKFLOW_NM
+         |   ),0) as TRIGGET
+         |from INFORMATICA_DELTA TD
+         |ORDER BY 3
+         |) TD
+         |WHERE rownum = 1
+         |""".stripMargin
+    logger.info("sql = {}",dbDailyQuery)
+    val records = oracleIngestionQueryLog(sparkSession,depenIp, depenPort, depenUserNm, depenPassword, dbDailyQuery, depenSid).collect()
+    if (records.nonEmpty) {
+      for (record <- records) {
+        // Access columns by index (0-based)
+        val sourceObject = record.getString(0)
+        val trigger = record.getDecimal(2)
+
+        val isReadyDepen = sourceObject.equalsIgnoreCase(prerequisiteTable) && trigger.intValue() == 1
+
+        return (isReadyDepen, Map(prerequisiteJobNameStr -> List(targetDate)))
+      }
+      (false,Map(prerequisiteJobNameStr -> List(targetDate)))
+    } else {
+      (false, Map(prerequisiteJobNameStr -> List(targetDate)))
+    }
+  }
+
   def delayTime(
                  spark: SparkSession,
                  jobNm: String,
@@ -849,6 +923,16 @@ class IngestFw(override val schemaName: String,
     }
   }
 
+  def convertPythonToPysparkFormat(pyFormat: String): String = {
+    val pythonToPyspark = Map(
+      "%Y" -> "yyyy", "%y" -> "yy", "%m" -> "MM", "%B" -> "MMMM", "%b" -> "MMM",
+      "%d" -> "dd", "%H" -> "HH", "%I" -> "hh", "%M" -> "mm", "%S" -> "ss",
+      "%f" -> "SSS", "%a" -> "EEE", "%A" -> "EEEE", "%w" -> "e", "%p" -> "a",
+      "%z" -> "Z", "%Z" -> "z"
+    )
+    pythonToPyspark.foldLeft(pyFormat)((current, entry) => current.replace(entry._1, entry._2))
+  }
+
   def checkLogIngestion(prerequisiteJobNm: Any, prerequisiteSchema: String, prerequisiteTable: String,
                         frequencyCheck: String, values: Option[String], emptyFlag: Int,
                         businessColumn: String, patternIctrlDtCheck: String,
@@ -856,15 +940,6 @@ class IngestFw(override val schemaName: String,
                         logTable: String = "tbl_ingest_logs", depenIp: String = "", depenPort: String = "",
                         depenUserNm: String = "", depenPassword: String = "", depenSid: String = "",
                         postgresConnectionInfo:ConnectionInfo): (Boolean, Map[String, List[String]]) = {
-    def convertPythonToPysparkFormat(pyFormat: String): String = {
-      val pythonToPyspark = Map(
-        "%Y" -> "yyyy", "%y" -> "yy", "%m" -> "MM", "%B" -> "MMMM", "%b" -> "MMM",
-        "%d" -> "dd", "%H" -> "HH", "%I" -> "hh", "%M" -> "mm", "%S" -> "ss",
-        "%f" -> "SSS", "%a" -> "EEE", "%A" -> "EEEE", "%w" -> "e", "%p" -> "a",
-        "%z" -> "Z", "%Z" -> "z"
-      )
-      pythonToPyspark.foldLeft(pyFormat)((current, entry) => current.replace(entry._1, entry._2))
-    }
 
     try {
       val checkInDate = if (businessColumn == "None" || businessColumn == null) "logs" else "rawDate"
@@ -900,7 +975,13 @@ class IngestFw(override val schemaName: String,
               postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm,
               postgresConnectionInfo.getPassword,query)
             try {
-              checkExistsDataWithOutCheckMiss(result.rs, targetDate, prerequisiteJobNameStr, emptyFlag, prerequisiteTableCleaned)
+              val map = checkExistsDataWithOutCheckMiss(result.rs, targetDate, prerequisiteJobNameStr, emptyFlag, prerequisiteTableCleaned)
+              if(!map._1) {
+                queryOracle(prerequisiteJobNameStr, patternIctrlDtCheck, prerequisiteTableCleaned, prerequisiteSchema, targetDate, depenIp, depenPort, depenUserNm, depenPassword, depenSid, prerequisiteTable)
+              }
+              else {
+                map
+              }
             }
             finally {
               result.close()
@@ -908,8 +989,7 @@ class IngestFw(override val schemaName: String,
           } else if (checkInDate == "rawDate") {
             val result = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTableCleaned, targetDate,sparkSession)
             if(result.isEmpty) {
-              val name = if (prerequisiteJobNameStr.nonEmpty) prerequisiteJobNameStr else prerequisiteTableCleaned
-              (false, Map(name -> List(targetDate)))
+              queryOracle(prerequisiteJobNameStr, patternIctrlDtCheck, prerequisiteTableCleaned, prerequisiteSchema, targetDate, depenIp, depenPort, depenUserNm, depenPassword, depenSid, prerequisiteTable)
             }
             else {
               (true, Map(prerequisiteJobNameStr -> List()))

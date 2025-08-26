@@ -41,9 +41,47 @@ class TransformFw(override val schemaName: String,
   def getVariableSchemaMapNameFromConstant: mutable.Map[String,String] = {
     val returnMap = mutable.Map.empty[String,String]
     for(schemaList <- SCHEMA_LIST.values()) {
-      returnMap.put(schemaList.getSchemaVariable,schemaList.getSchemaName)
+      if(schemaName.endsWith("_uat"))
+        returnMap.put(schemaList.getSchemaVariable,schemaList.getSchemaNameUat)
+      else
+        returnMap.put(schemaList.getSchemaVariable,schemaList.getSchemaName)
     }
     returnMap
+  }
+
+  def postProcess(status: String,
+                  dependencyCheckModel: DependencyCheckModel,
+                  errorMsg: String,
+                  runId: String, sparkSession: SparkSession, logUrl: String,
+                  jobStartTime: LocalDateTime, jobEndTime: LocalDateTime,
+                  refDate: LocalDateTime, connectionInfo: ConnectionInfo,
+                  ictrlDt: String, jobName: String, tblLogName: String,
+                  tblConfName: String,lastSuccessIctrlDt: String,
+                  isTmpTableExists: Boolean): Unit = {
+    val duration = Duration.between(jobStartTime, jobEndTime)
+    var rowCount = 0L
+    if(isTmpTableExists && status == "SUCCEED") {
+      rowCount = sparkSession.table(f"$tmpzSchema.${jobName}_tmp_validation").count()
+    }
+    val hours = duration.toHours
+    val minutes = duration.minusHours(hours).toMinutes
+    val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
+    val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
+    val params = Seq(status, errorMsg, rowCount, logUrl,
+      durationString,jobEndTime, jobName, runId, ictrlDt, refDate)
+    val sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
+      f"err_msg = ?, row_cnt = ?, log_url = ?, duration = ?,job_end_time = ? " +
+      f"where job_nm = ? and dag_run_id = ? and ictrl_dt = ? " +
+      f"and round_time = ?"
+    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,
+      connectionInfo.getPort, connectionInfo.getDbName,
+      connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
+    if (status.equals("SUCCESS") && (lastSuccessIctrlDt == null || lastSuccessIctrlDt.toInt < ictrlDt.toInt)) {
+      val sql = s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
+        s"where job_nm = '${jobName}'"
+      ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+        connectionInfo.getUserNm, connectionInfo.getPassword, sql, Seq.empty)
+    }
   }
 
   override def doRunFramework(dependencyCheckModel: DependencyCheckModel,
@@ -85,7 +123,14 @@ class TransformFw(override val schemaName: String,
           masterRefDate = minusDateByFrequency(dependencyCheckModel.get_bldStartDate().toLocalDateTime,frequency,backdate)
         }
         else {
-          masterRefDate = parseToLocalDateTime(dependencyCheckModel.getFixedDate,dateFormatIctrlDtForTb).get
+          try{
+            masterRefDate = parseToLocalDateTime(dependencyCheckModel.getFixedDate,"yyyyMMdd").get
+          }
+          catch {
+            case ex: Exception => {
+              masterRefDate = parseToLocalDateTime(dependencyCheckModel.getFixedDate,dateFormatIctrlDtForTb).get
+            }
+          }
         }
         if(currentDateRun == null || loadType.equals(LOAD_TYPE.FULL_LOAD.getValue)) {
           currentLocalDateRun = masterRefDate
@@ -173,7 +218,7 @@ class TransformFw(override val schemaName: String,
               var stepRunNext = "FW RUN SCRIPTS TRANSFORMATION"
               var stepSeqNext = "FW:2"
               insertAuditLogDetail(stepRun,stepSeq,jobName,runId,taskGroupName,schemaNameFromTbl,
-                tableName,loadType,roundTime,startDetailTime,"SUCCESS",refDateIctrlDt,
+                tableName,loadType,roundTime,startDetailTime,"SUCCEED",refDateIctrlDt,
                 stepRunNext,stepSeqNext,connectionInfo,"tbl_trans_audit_detail_logs",
                 "tbl_trans_audit_detail_next_logs")
               startDetailTime = LocalDateTime.now()
@@ -215,7 +260,7 @@ class TransformFw(override val schemaName: String,
               var runNotebookParallelResult: RunNotebookParallelResult = null
               if(JOB_TYPE == JobConstant.JOB_TYPE.TRANSFORM) {
                 runNotebookParallelResult = doRunNotebookParallel(param,
-                  controlJobDf.getAs[String]("script_path"), dependencyCheckModel,
+                  controlJobDf.getAs[String]("script_path").trim, dependencyCheckModel,
                   username, runId,httpServletRequest)
               }
               else if(JOB_TYPE == JobConstant.JOB_TYPE.OUTBOUND) {
@@ -223,7 +268,8 @@ class TransformFw(override val schemaName: String,
                   "", dependencyCheckModel,
                   username, runId,httpServletRequest)
               }
-              var status = "SUCCESS"
+              var status = "SUCCEED"
+              val isTmpTableExists = sparkSession.catalog.tableExists(f"$tmpzSchema.${jobName}_tmp_validation") && sparkSession.table(f"$tmpzSchema.${jobName}_tmp_validation").isEmpty
               if (runNotebookParallelResult.getErrorMsg != null) {
                 status = "FAILED"
                 postProcess(status, dependencyCheckModel,
@@ -231,7 +277,7 @@ class TransformFw(override val schemaName: String,
                   runId, sparkSession,
                   runNotebookParallelResult.getNotebookUrl, runTime,
                   LocalDateTime.now(), roundTime, connectionInfo, refDateIctrlDt, jobName,
-                  "tbl_trans_audit_logs", tblConfName,lastSuccessIctrlDt)
+                  "tbl_trans_audit_logs", tblConfName,lastSuccessIctrlDt,isTmpTableExists)
                 throw new RunNotebookParallelException(runNotebookParallelResult.getErrorMsg)
               }
               val partitionCol: List[String] = scalaObjectMapper.readValue(
@@ -241,38 +287,40 @@ class TransformFw(override val schemaName: String,
               stepRunNext = "FW VALIDATION PROCESS"
               stepSeqNext = "FW:3"
               insertAuditLogDetail(stepRun,stepSeq,jobName,runId,taskGroupName,schemaNameFromTbl,
-                tableName,loadType,roundTime,startDetailTime,"SUCCESS",refDateIctrlDt,
+                tableName,loadType,roundTime,startDetailTime,"SUCCEED",refDateIctrlDt,
                 stepRunNext,stepSeqNext,connectionInfo,"tbl_trans_audit_detail_logs",
                 "tbl_trans_audit_detail_next_logs")
               startDetailTime = LocalDateTime.now()
-              DataValidator.insertToTargetMode(controlJobDf.getAs[String]("schema_nm"),
-                controlJobDf.getAs[String]("table_nm"), "tmp_validation",
-                controlJobDf.getAs[String]("load_type"), partitionCol, controlJobDf.
-                  getAs[String]("unique_key"), Some(controlJobDf.getAs[String]("update_condition")),
-                jobName, connectionInfo, sparkSession, tmpzSchema)
-              val sql = f"select job_nm,schema_nm,tbl_nm,rule_nm,rule_calc," +
-                f"rule_calc_apply_col,expect_value,operation,sql_calc,sql_calc_apply," +
-                f"validate_mode,margin_pct,validate_seq  from $schemaName.tbl_validation " +
-                f"where job_nm = '$jobName' and active_flag = 'Y' order by validate_seq"
-              val validateDf = ConnectionService.postgresqlQueryDirectly(connectionInfo.getIp,connectionInfo.getPort
-                ,connectionInfo.getDbName,connectionInfo.getUserNm,connectionInfo.getPassword,sql)
-              try {
-                DataValidator.processValidationRows(sparkSession, validateDf.rs,
-                  "_tmp_validation", loadType)
-              }
-              finally {
-                validateDf.close()
+              if(isTmpTableExists) {
+                val sql = f"select job_nm,schema_nm,tbl_nm,rule_nm,rule_calc," +
+                  f"rule_calc_apply_col,expect_value,operation,sql_calc,sql_calc_apply," +
+                  f"validate_mode,margin_pct,validate_seq  from $schemaName.tbl_validation " +
+                  f"where job_nm = '$jobName' and active_flag = 'Y' order by validate_seq"
+                val validateDf = ConnectionService.postgresqlQueryDirectly(connectionInfo.getIp, connectionInfo.getPort
+                  , connectionInfo.getDbName, connectionInfo.getUserNm, connectionInfo.getPassword, sql)
+                try {
+                  DataValidator.processValidationRows(sparkSession, validateDf.rs,
+                    "_tmp_validation", loadType)
+                }
+                finally {
+                  validateDf.close()
+                }
+                DataValidator.insertToTargetMode(controlJobDf.getAs[String]("schema_nm"),
+                  controlJobDf.getAs[String]("table_nm"), "tmp_validation",
+                  controlJobDf.getAs[String]("load_type"), partitionCol, controlJobDf.
+                    getAs[String]("unique_key"), Some(controlJobDf.getAs[String]("update_condition")),
+                  jobName, connectionInfo, sparkSession, tmpzSchema)
               }
               postProcess(status, dependencyCheckModel, runNotebookParallelResult.getErrorSpecificMsg,
                 runId, sparkSession, runNotebookParallelResult.getNotebookUrl, runTime,
                 LocalDateTime.now(), roundTime, connectionInfo, refDateIctrlDt, jobName,
-                "tbl_trans_audit_logs", tblConfName,lastSuccessIctrlDt)
+                "tbl_trans_audit_logs", tblConfName,lastSuccessIctrlDt,isTmpTableExists)
               stepRun = "FW VALIDATION PROCESS"
               stepSeq = "FW:3"
               stepRunNext = "FW NOTIFICATION SENT"
               stepSeqNext = "FW:4"
               insertAuditLogDetail(stepRun,stepSeq,jobName,runId,taskGroupName,schemaNameFromTbl,
-                tableName,loadType,roundTime,startDetailTime,"SUCCESS",refDateIctrlDt,
+                tableName,loadType,roundTime,startDetailTime,"SUCCEED",refDateIctrlDt,
                 stepRunNext,stepSeqNext,connectionInfo,"tbl_trans_audit_detail_logs",
                 "tbl_trans_audit_detail_next_logs")
 //              Notifier.notifierCore(sparkSession,jobName, status, refDateIctrlDt,
@@ -296,7 +344,8 @@ class TransformFw(override val schemaName: String,
                   updateStateOfAuditLogByJobNameAndRoundTimeAndDagRun(
                     "FAILED",
                     dependencyCheckModel, runId, LocalDateTime.now(),
-                    roundTime, connectionInfo, exception.getMessage, "tbl_trans_audit_logs")
+                    roundTime, connectionInfo, exception.getMessage, "tbl_trans_audit_logs",
+                    jobName)
                 }
                 throw new Exception(exception.getMessage)
               }
@@ -396,33 +445,36 @@ class TransformFw(override val schemaName: String,
       connectionInfo.getIp,connectionInfo.getPort,
       connectionInfo.getDbName,connectionInfo.getUserNm,connectionInfo.getPassword
       ,s"select * from $schemaName.tbl_job_dependency where " +
-        s"job_nm = '$jobName' and UPPER(active_flag) = 'Y'")
+        s"job_nm = '$jobName'")
     val returnJobMap = new java.util.HashMap[String,Boolean]()
     try {
       while(df.rs.next()) {
         val r = df.rs
+        val activeFlag = r.getString("active_flag")
         val preReqSchemaNm = r.getString("prerequisite_schema_nm")
         val uatSchemaVariable = SCHEMA_LIST.schemaUatMap.get(preReqSchemaNm)
         if(uatSchemaVariable != null) {
           schemaMap.put(uatSchemaVariable,preReqSchemaNm)
         }
-        var seqList = checkLog(r.getString("prerequisite_job_nm"),preReqSchemaNm,
-          r.getString("prerequisite_table_nm"),r.getString("frequency_check"),
-          r.getObject("value"),r.getObject("empty_flag"),refDateIctrlDt,"tbl_trans_audit_logs",
-          r.getString("data_column"),convertPythonDateFormatToJava(
-            r.getString("ictrl_dt_tgtfmt")),masterRefDate,
-          frequencyValue,convertPythonDateFormatToJava(ictrlDtPattern),
-          startICtrlDt,backdate,connectionInfo,sparkSession)
-        if(!seqList._1) {
-          seqList = checkLog(r.getString("prerequisite_job_nm"),preReqSchemaNm,
+        if(activeFlag.equalsIgnoreCase("y")) {
+          var seqList = checkLog(r.getString("prerequisite_job_nm"),preReqSchemaNm,
             r.getString("prerequisite_table_nm"),r.getString("frequency_check"),
-            r.getObject("value"),r.getObject("empty_flag"),refDateIctrlDt,"tbl_ingest_audit_logs",
+            r.getObject("value"),r.getObject("empty_flag"),refDateIctrlDt,"tbl_trans_audit_logs",
             r.getString("data_column"),convertPythonDateFormatToJava(
               r.getString("ictrl_dt_tgtfmt")),masterRefDate,
             frequencyValue,convertPythonDateFormatToJava(ictrlDtPattern),
             startICtrlDt,backdate,connectionInfo,sparkSession)
+          if(!seqList._1) {
+            seqList = checkLog(r.getString("prerequisite_job_nm"),preReqSchemaNm,
+              r.getString("prerequisite_table_nm"),r.getString("frequency_check"),
+              r.getObject("value"),r.getObject("empty_flag"),refDateIctrlDt,"tbl_ingest_audit_logs",
+              r.getString("data_column"),convertPythonDateFormatToJava(
+                r.getString("ictrl_dt_tgtfmt")),masterRefDate,
+              frequencyValue,convertPythonDateFormatToJava(ictrlDtPattern),
+              startICtrlDt,backdate,connectionInfo,sparkSession)
+          }
+          returnJobMap.put(r.getString("prerequisite_job_nm"),seqList._1)
         }
-        returnJobMap.put(r.getString("prerequisite_job_nm"),seqList._1)
       }
     }
     finally {

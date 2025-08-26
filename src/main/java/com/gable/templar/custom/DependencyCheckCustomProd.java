@@ -39,10 +39,10 @@ public class DependencyCheckCustomProd extends DefaultCustomService<DependencyCh
     void init() {
         transformFw = new TransformFw("fwconfz",
                 heraConfig.getHeraUrl(),loginUser, SparkServer.getZeusSession().session(),
-                taskExecutor);
+                NewThreadExecutor.threadExecutor);
         ingestFw =  new IngestFw("fwconfz",
                 heraConfig.getHeraUrl(),loginUser, SparkServer.getZeusSession().session(),
-                taskExecutor);
+                NewThreadExecutor.threadExecutor);
     }
 
     private TransformFw transformFw;
@@ -83,6 +83,8 @@ public class DependencyCheckCustomProd extends DefaultCustomService<DependencyCh
                 return transformFw;
             }
             case INGEST_API:
+            case KAFKA:
+            case FILE:
             case INGEST_DB: {
                 return ingestFw;
             }

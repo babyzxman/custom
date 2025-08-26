@@ -14,6 +14,7 @@ import org.apache.spark.sql.types.{BinaryType, BooleanType, DataType, DateType, 
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.slf4j.{Logger, LoggerFactory}
 import org.springframework.core.task.TaskExecutor
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor
 import org.springframework.web.context.request.{RequestContextHolder, ServletRequestAttributes}
 
 import java.sql.{DriverManager, ResultSet, ResultSetMetaData, Timestamp, Types}
@@ -21,7 +22,7 @@ import java.time.{Duration, LocalDate, LocalDateTime, YearMonth}
 import java.time.format.{DateTimeFormatter, DateTimeParseException}
 import java.time.temporal.ChronoUnit
 import java.util
-import java.util.concurrent.{CompletableFuture, Future, Semaphore}
+import java.util.concurrent.{CompletableFuture, Future, Semaphore, ThreadPoolExecutor}
 import javax.servlet.http.HttpServletRequest
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -202,6 +203,17 @@ trait CustomFw {
 
 
   def doRunTaskGroup(dependencyCheckModel: DependencyCheckModel, jobType: JOB_TYPE): util.ArrayList[ExecuteResponse] = {
+    taskExecutor match {
+      case tpe: ThreadPoolTaskExecutor =>
+        val poolSize = tpe.getPoolSize // Current threads in the pool
+
+        val active = tpe.getActiveCount // Currently running tasks
+
+        logger.info("Active={}",active)
+        logger.info("Pool = {}",poolSize)
+      case other =>
+        logger.info("other class = {}",other.getClass)
+    }
     val tblConfName = getTblConfNameByJobType(jobType)
     val queryMasterSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = 'fw_postgre'"
     val postgresConnectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql, salt, ultKey)
@@ -296,44 +308,13 @@ trait CustomFw {
   def updateStateOfAuditLogByJobNameAndRoundTimeAndDagRun(status: String, dependencyCheckModel: DependencyCheckModel,
                                                           runId: String, jobEndTime: LocalDateTime,
                                                           roundTime: LocalDateTime, connectionInfo: ConnectionInfo,
-                                                          errorMsg: String, tableNm: String): Unit = {
-    val params = Seq(status, jobEndTime, errorMsg, dependencyCheckModel.getJobName, runId, roundTime)
+                                                          errorMsg: String, tableNm: String,jobName: String): Unit = {
+    val params = Seq(status, jobEndTime, errorMsg, jobName, runId, roundTime)
     val sql = f"update ${this.schemaName}.$tableNm set status = ?, " +
       f"job_end_time = ?,  err_msg = ? where " +
       f"job_nm = ? and dag_run_id = ? and round_time = ?"
     ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
       connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
-  }
-
-  def postProcess(status: String,
-                  dependencyCheckModel: DependencyCheckModel,
-                  errorMsg: String,
-                  runId: String, sparkSession: SparkSession, logUrl: String,
-                  jobStartTime: LocalDateTime, jobEndTime: LocalDateTime,
-                  refDate: LocalDateTime, connectionInfo: ConnectionInfo,
-                  ictrlDt: String, jobName: String, tblLogName: String,
-                  tblConfName: String,lastSuccessIctrlDt: String): Unit = {
-    val duration = Duration.between(jobStartTime, jobEndTime)
-    val rowCount = sparkSession.table(f"$tmpzSchema.${jobName}_tmp_validation").count()
-    val hours = duration.toHours
-    val minutes = duration.minusHours(hours).toMinutes
-    val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
-    val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
-    val params = Seq(status, errorMsg, rowCount, logUrl,
-      durationString,jobEndTime, jobName, runId, ictrlDt, refDate)
-    val sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
-      f"err_msg = ?, row_cnt = ?, log_url = ?, duration = ?,job_end_time = ? " +
-      f"where job_nm = ? and dag_run_id = ? and ictrl_dt = ? " +
-      f"and round_time = ?"
-    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,
-      connectionInfo.getPort, connectionInfo.getDbName,
-      connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
-    if (status.equals("SUCCESS") && (lastSuccessIctrlDt == null || lastSuccessIctrlDt.toInt < ictrlDt.toInt)) {
-      val sql = s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
-        s"where job_nm = '${jobName}'"
-      ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
-        connectionInfo.getUserNm, connectionInfo.getPassword, sql, Seq.empty)
-    }
   }
 
 
@@ -362,7 +343,7 @@ trait CustomFw {
     logger.info(f"request  = ${objectMapper.writeValueAsString(notebookRunParallelRequest)}")
     val response = RestTemplateFactoryUtil.getRestTemplar(token, true).postForObject(f"$heraUrl/private/notebook/start/session/parallel", notebookRunParallelRequest, classOf[NotebookRunParallelResponse])
     val notebookList = response.getNotebookRefIds
-    logger.info(f"request parallel result = ${response}")
+    logger.info(f"request parallel result = ${objectMapper.writeValueAsString(response)}")
     val notebookCheckParallelRequest = new NotebookCheckParallelRequest
     notebookCheckParallelRequest.setRunningId(runId)
     val returnResponse: StringBuilder = new StringBuilder()
@@ -865,9 +846,6 @@ trait CustomFw {
       if (status == "SUCCEED" && rowCnt >= emptyFlag) {
         println("table is ready.")
         return (true, Map(prerequisiteJobNameStr -> List()))
-      } else {
-        println("table is not ready.")
-        return (false, Map(prerequisiteJobNameStr -> List(targetDate)))
       }
     }
     val name = if (prerequisiteJobNameStr.nonEmpty) prerequisiteJobNameStr else prerequisiteTableCleaned

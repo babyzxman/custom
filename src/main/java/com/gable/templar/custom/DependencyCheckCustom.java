@@ -49,10 +49,10 @@ public class DependencyCheckCustom extends DefaultCustomService<DependencyCheckM
     void init() {
         transformFw = new TransformFw("fwconfz_uat",
                 heraConfig.getHeraUrl(),loginUser, SparkServer.getZeusSession().session(),
-                taskExecutor);
+                NewThreadExecutor.threadExecutor);
         ingestFw =  new IngestFw("fwconfz_uat",
                 heraConfig.getHeraUrl(),loginUser, SparkServer.getZeusSession().session(),
-                taskExecutor);
+                NewThreadExecutor.threadExecutor);
     }
 
     @Override
