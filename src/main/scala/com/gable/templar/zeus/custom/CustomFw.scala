@@ -49,7 +49,10 @@ trait CustomFw {
 
 
   var tmpzSchema: String = {
-    if (schemaName.endsWith("_uat")) {
+    if (schemaName.endsWith("true_dev")) {
+      "tmpz_true_dev"
+    }
+    else if (schemaName.endsWith("_uat")) {
       "tmpz_uat"
     }
     else {
@@ -305,14 +308,37 @@ trait CustomFw {
     }
   }
 
+  def updateJobStatusAndErrorMessage(jobName: String,roundTime: LocalDateTime, dagRunId: String,
+                                     tableNm:String, connectionInfo: ConnectionInfo,status: String,
+                                     errorMsg: String,ictrlDt: String): Unit = {
+    val params = Seq(status,errorMsg,jobName,dagRunId,roundTime,ictrlDt)
+    val sql = f"update ${this.schemaName}.$tableNm set status = ?, err_msg = ? where " +
+      f"job_nm = ? and dag_run_id = ? and round_time = ? and ictrl_dt = ?"
+    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+      connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
+  }
+
+  def updateJobStartTimeOfAuditLogByJobNameAndRoundTimeAndDagRun(jobName:String, jobStartTime: LocalDateTime,
+                                                                 roundTime: LocalDateTime,dagRunId: String,
+                                                                 tableNm: String,connectionInfo: ConnectionInfo,
+                                                                 ictrlDt: String): Unit = {
+    val params = Seq(jobStartTime,jobName,dagRunId,roundTime,ictrlDt)
+    val sql = f"update ${this.schemaName}.$tableNm set job_start_time = ? " +
+      f"where job_nm = ? and dag_run_id = ? and round_time = ? and ictrl_dt = ?"
+    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+      connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
+  }
+
   def updateStateOfAuditLogByJobNameAndRoundTimeAndDagRun(status: String, dependencyCheckModel: DependencyCheckModel,
                                                           runId: String, jobEndTime: LocalDateTime,
                                                           roundTime: LocalDateTime, connectionInfo: ConnectionInfo,
-                                                          errorMsg: String, tableNm: String,jobName: String): Unit = {
-    val params = Seq(status, jobEndTime, errorMsg, jobName, runId, roundTime)
+                                                          errorMsg: String, tableNm: String,jobName: String,ictrlDt:String): Unit = {
+    val params = Seq(status, jobEndTime,jobEndTime,"00:00:00",
+      jobEndTime, errorMsg, jobName, runId, roundTime,ictrlDt)
     val sql = f"update ${this.schemaName}.$tableNm set status = ?, " +
+      f"custom_end_time=?,job_start_time=?,duration=?," +
       f"job_end_time = ?,  err_msg = ? where " +
-      f"job_nm = ? and dag_run_id = ? and round_time = ?"
+      f"job_nm = ? and dag_run_id = ? and round_time = ? and ictrl_dt = ?"
     ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
       connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
   }

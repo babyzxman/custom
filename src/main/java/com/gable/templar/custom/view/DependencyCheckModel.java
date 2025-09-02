@@ -1,10 +1,13 @@
 package com.gable.templar.custom.view;
 
 import java.sql.Timestamp;
+import java.util.List;
 
 public class DependencyCheckModel {
 
     private String jobName;
+
+    private List<String> jobNames;
 
     private String fixedDate;
 
@@ -152,5 +155,13 @@ public class DependencyCheckModel {
 
     public void setWorkspaceName(String workspaceName) {
         this.workspaceName = workspaceName;
+    }
+
+    public List<String> getJobNames() {
+        return jobNames;
+    }
+
+    public void setJobNames(List<String> jobNames) {
+        this.jobNames = jobNames;
     }
 }

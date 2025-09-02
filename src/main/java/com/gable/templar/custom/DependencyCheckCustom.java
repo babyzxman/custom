@@ -32,18 +32,11 @@ public class DependencyCheckCustom extends DefaultCustomService<DependencyCheckM
     @Autowired
     private LoginUser loginUser;
 
-    @Autowired
-    private TaskExecutor taskExecutor;
-
     private TransformFw transformFw;
 
     private IngestFw ingestFw;
 
     private final GeneralService generalService = new GeneralService();
-
-    private final String salt = "rTYlPkZH37QOf7Xx1GzZ0hakdl/2/Z02HlPesDfQ2lM=";
-
-    private final String ultKey = "AdKX67Zn0JRJSGJQ7/4LrQOsZ0IW8+Fcdh7hpeJV8GeVNiPIs4i0RZ4T+XjXyEb0";
 
     @PostConstruct
     void init() {
@@ -57,38 +50,7 @@ public class DependencyCheckCustom extends DefaultCustomService<DependencyCheckM
 
     @Override
     public Object execute(DependencyCheckModel params) throws Exception {
-        SparkSession sparkSession = SparkServer.getZeusSession().session();
-        JobConstant.JOB_TYPE jobType = null;
-        String queryMasterSql = "SELECT system,key,values FROM fwconfz_uat.tbl_master_config where system = 'fw_postgre'";
-        ConnectionInfo postgresConnectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql, salt, ultKey);
-        if(params.getTaskGroupName() != null) {
-            jobType = generalService.checkJobTypeFromTaskGroup(
-                    params.getTaskGroupName(),sparkSession,"fwconfz_uat");
-        }
-        else {
-            jobType = generalService.checkJobTypeFromJobName(
-                    params.getJobName(), "fwconfz_uat",postgresConnectionInfo);
-        }
-        CustomFw customFw = getCustomFwClassByJobType(jobType);
-        ExecuteResponseWrap executeResponseWrap = new ExecuteResponseWrap();
-        executeResponseWrap.setExecuteResponseList(customFw.doRunTaskGroup(params,jobType));
-        return executeResponseWrap;
-    }
-
-    public CustomFw getCustomFwClassByJobType(JobConstant.JOB_TYPE jobType) {
-        switch (jobType) {
-            case OUTBOUND:
-            case TRANSFORM: {
-                return transformFw;
-            }
-            case INGEST_API:
-            case KAFKA:
-            case FILE:
-            case INGEST_DB: {
-                return ingestFw;
-            }
-        }
-        return null;
+        return generalService.doRunFrameWork(params,transformFw,ingestFw,"fwconfz_uat");
     }
 
     @Override

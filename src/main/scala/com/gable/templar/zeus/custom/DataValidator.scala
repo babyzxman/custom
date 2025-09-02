@@ -4,13 +4,17 @@ import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.zeus.service.vector.ConnectionInfo
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession, functions}
-import org.apache.spark.sql.functions.{avg, col, expr}
+import org.apache.spark.sql.functions.{avg, col, current_timestamp, expr, lit}
+import org.apache.spark.sql.types.IntegerType
 
 import java.sql.ResultSet
+import java.util.UUID
 import scala.util.Try
 import scala.util.matching.Regex
 
 object DataValidator {
+
+  private val autoGenerateColName: Set[String] = Set("execution_id","process_name","dw_last_update_time")
 
   // Assumed SparkSession is available in the environment
 
@@ -90,6 +94,27 @@ object DataValidator {
       throw new InvalidArgumentException("validate not data not success")
     }
     resultDict.toMap
+  }
+
+  def withColumnIncaseOfMissingColumn(tmpzTable: DataFrame, targetTableName: String,
+                                      sparkSession: SparkSession,jobNm: String): DataFrame = {
+    val targetTableDf = sparkSession.table(targetTableName)
+    val executionId = System.currentTimeMillis()
+    if(targetTableDf.schema.length > tmpzTable.schema.length) {
+      var schemaFoundCount = 0
+      targetTableDf.schema.foreach(f => {
+        if(autoGenerateColName.contains(f.name)) {
+          schemaFoundCount += 1
+        }
+      })
+      if(schemaFoundCount.equals(autoGenerateColName.size)) {
+        return tmpzTable.select(col("*"),
+          lit(executionId).cast(IntegerType).as("execution_id"),
+          lit(jobNm),current_timestamp().as("dw_last_update_time"))
+      }
+      return tmpzTable
+    }
+    tmpzTable
   }
 
   def validateTblOperation(jobName: String, schemaName: String, tblName: String, ruleCalc: String, ruleCalcApplyCol: List[String],
@@ -269,17 +294,17 @@ object DataValidator {
     val schemaTempTbl = TableUtils.tableSchemaCheck(tmpTableNm, tmpz)
     var tempTableDf: DataFrame = null
     if(spark.catalog.tableExists(schemaTempTbl)) {
-      spark.catalog.refreshTable(schemaTempTbl)
+//      spark.catalog.refreshTable(schemaTempTbl)
       tempTableDf = spark.table(schemaTempTbl)
     }
     else {
       val legacyTmpTableNm = s"${tblName}_$tmpValidationNm"
       val legacySchemaTempTbl = TableUtils.tableSchemaCheck(legacyTmpTableNm, tmpz)
-      spark.catalog.refreshTable(legacySchemaTempTbl)
+//      spark.catalog.refreshTable(legacySchemaTempTbl)
       tempTableDf = spark.table(legacySchemaTempTbl)
     }
     val tableType = checkTableType(schemaTargetTbl)
-
+    tempTableDf = withColumnIncaseOfMissingColumn(tempTableDf,schemaTargetTbl,spark,jobNm)
     insertMode.toLowerCase match {
       case "full_load" | "overwrite" if partitionColumns.isEmpty =>
         println("Full_load")

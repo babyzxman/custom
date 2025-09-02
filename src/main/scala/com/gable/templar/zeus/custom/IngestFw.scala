@@ -141,16 +141,6 @@ class IngestFw(override val schemaName: String,
                            refDate: LocalDateTime, connectionInfo: ConnectionInfo,
                            ictrlDt: String, jobName: String, tblLogName: String,
                            tblConfName: String,lastSuccessIctrlDt: String): Unit = {
-    val query = f"select * from ${this.schemaName}.$tblLogName where " +
-      f"job_nm = '${dependencyCheckModel.getJobName}' and dag_run_id = '${runId}' and ictrl_dt = '${ictrlDt}' " +
-        f"and round_time = '${refDate}'"
-    val df = ConnectionService.postgresqlQueryDirectly(connectionInfo.getIp,connectionInfo.getPort,
-      connectionInfo.getDbName,connectionInfo.getUserNm,connectionInfo.getPassword,query)
-    var isHaveErrorMsg = false
-    while(df.rs.next()) {
-      val errorMsg = df.rs.getString("err_msg")
-      isHaveErrorMsg = errorMsg != null && errorMsg.nonEmpty && errorMsg != "-"
-    }
     val duration = Duration.between(jobStartTime, jobEndTime)
     val hours = duration.toHours
     val minutes = duration.minusHours(hours).toMinutes
@@ -158,23 +148,14 @@ class IngestFw(override val schemaName: String,
     val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
     var params: Seq[Any] = Seq.empty
     var sql: String = null
-    if(!isHaveErrorMsg) {
-      params = Seq(status, errorMsg, logUrl,
-        durationString, jobEndTime, jobName, runId, ictrlDt, refDate)
-      sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
-        f"err_msg = ?, log_url = ?, duration = ?, job_end_time = ?  " +
-        f"where job_nm = ? and dag_run_id = ? and ictrl_dt = ? " +
-        f"and round_time = ?"
-    }
-    else {
-      params = Seq(status, logUrl,
-        durationString, jobEndTime, jobName, runId, ictrlDt, refDate)
-      sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
-        f"log_url = ?, duration = ?, job_end_time = ?  " +
-        f"where job_nm = ? and dag_run_id = ? and ictrl_dt = ? " +
-        f"and round_time = ?"
-    }
-    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+    params = Seq(status, logUrl,
+      durationString, jobEndTime,jobEndTime, jobName, runId, ictrlDt, refDate)
+    sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
+      f"log_url = ?, duration = ?, job_end_time = ?, custom_end_time = ?  " +
+      f"where job_nm = ? and dag_run_id = ? and ictrl_dt = ? " +
+      f"and round_time = ?"
+    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,
+      connectionInfo.getPort, connectionInfo.getDbName,
       connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
     if (status.equals("SUCCESS") && (lastSuccessIctrlDt == null || lastSuccessIctrlDt.toInt < ictrlDt.toInt)){
       val sql = s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
@@ -201,7 +182,7 @@ class IngestFw(override val schemaName: String,
     SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, target_schema_nm, target_table_nm, job_start_time, job_end_time, ictrl_dt, status
     FROM $ingestAuditLogsTable
     WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroup_nm) =
-    lower('$tasksgroupNmUpdate') AND ictrl_dt = '$ictrlDtUpdate' AND status = 'RUNNING'
+    lower('$tasksgroupNmUpdate') AND ictrl_dt = '$ictrlDtUpdate' AND (status = 'RUNNING' OR status = 'WAITING')
     AND round_time != '$roundTime'
     ORDER BY round_time DESC
     LIMIT 1
@@ -212,7 +193,7 @@ class IngestFw(override val schemaName: String,
     SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, target_schema_nm, target_table_nm, job_start_time, job_end_time, ictrl_dt, status
     FROM $ingestAuditLogsTable
     WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroup_nm) = lower('$tasksgroupNmUpdate')
-    AND ictrl_dt IS NOT NULL AND status = 'RUNNING' AND round_time != '$roundTime'
+    AND ictrl_dt IS NOT NULL AND (status = 'RUNNING' OR status = 'WAITING') AND round_time != '$roundTime'
     ORDER BY round_time DESC
     LIMIT 1
     """
@@ -276,7 +257,7 @@ class IngestFw(override val schemaName: String,
       s"""
   SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, target_schema_nm, target_table_nm, job_start_time, job_end_time, ictrl_dt, status
   FROM $ingestAuditLogsTable
-  WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroup_nm) = lower('$tasksgroupNmUpdate') AND ictrl_dt IS NULL AND status = 'RUNNING' AND round_time >= '$strCheckRoundTime' AND round_time < '$strCheckCurrectRoundTime'
+  WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroup_nm) = lower('$tasksgroupNmUpdate') AND ictrl_dt IS NULL AND (status = 'RUNNING' OR status = 'WAITING') AND round_time >= '$strCheckRoundTime' AND round_time < '$strCheckCurrectRoundTime'
   ORDER BY round_time DESC
   LIMIT 1
   """
@@ -429,7 +410,10 @@ class IngestFw(override val schemaName: String,
           var currentLocalDateRun: LocalDateTime = null
           val taskGroupName = controlJobDf.getAs[String]("tasksgroup_nm")
           val catchUpType = JobConstant.CATCHUP_TYPE.SEQUENCE.getValue
-          val ictrlDtTgtFmt = controlJobDf.getAs[String]("ictrl_dt_tgtfmt")
+          var ictrlDtTgtFmt = controlJobDf.getAs[String]("ictrl_dt_tgtfmt")
+          if(ictrlDtTgtFmt == null) {
+            ictrlDtTgtFmt = "%Y%m%d"
+          }
           val dateFormatIctrlDtForTb = convertPythonDateFormatToJava(ictrlDtTgtFmt)
           val tableName = controlJobDf.getAs[String]("target_table_nm")
           val loadType = controlJobDf.getAs[String]("load_type")
@@ -531,15 +515,16 @@ class IngestFw(override val schemaName: String,
                 roundTime,controlJobDf.getAs[String]("load_type"),controlJobDf.getAs[String]("ingestion_type"),
                 taskGroupName,jobName)
               try {
+                var jobEndTime: LocalDateTime = null
                 checkRunningIctrlDtIngest(jobName,
                   taskGroupName, refDateIctrlDt, roundTime, runTime, startDateWithOverlapIctrlDt,
                   refDateIctrlDt, processJobType, isCdr, runId,
                   sparkSession.sparkContext.applicationId, postgresConnectionInfo)
                 var startDetailTime: LocalDateTime = LocalDateTime.now()
+                val queryMasterSourceSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = 'core_dwh_TEDWHDPAPPB'"
+                val connectionInfo = ConnectionService.getMasterConfigLog(queryMasterSourceSql, salt, ultKey)
                 breakable {
                   for (i <- 0 to totalRetry) {
-                    val queryMasterSourceSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = '${controlJobDf.getAs[String]("connector_source")}'"
-                    val connectionInfo = ConnectionService.getMasterConfigLog(queryMasterSourceSql, salt, ultKey)
                     val results: java.util.Map[String, Boolean] =
                       checkDependencyByJobName(controlJobDf, ictrlDtRun, postgresConnectionInfo,
                         refDateIctrlDt, currentDateRun, connectionInfo, jobName,null)
@@ -560,7 +545,12 @@ class IngestFw(override val schemaName: String,
                     else {
                       break()
                     }
+                    updateJobStatusAndErrorMessage(jobName,roundTime,runId,
+                      "tbl_ingest_audit_logs",postgresConnectionInfo,
+                      "WAITING","wailting depen",refDateIctrlDt)
                     Thread.sleep(timeRetry * 1000)
+                    updateJobStatusAndErrorMessage(jobName,roundTime,runId,
+                      "tbl_ingest_audit_logs",postgresConnectionInfo,"running",null,refDateIctrlDt)
                   }
                 }
                 var stepRun = "FW CHECK PREREQUISITE"
@@ -597,6 +587,10 @@ class IngestFw(override val schemaName: String,
                 else
                   param.put("job_run_mode", objectMapper.valueToTree("job"))
                 param.put("round_time", objectMapper.valueToTree(roundTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS"))))
+                val jobStartTime: LocalDateTime = LocalDateTime.now()
+                updateJobStartTimeOfAuditLogByJobNameAndRoundTimeAndDagRun(
+                  jobName,jobStartTime,roundTime,runId,
+                  "tbl_ingest_audit_logs",postgresConnectionInfo,refDateIctrlDt)
                 val runNotebookParallelResult =
                   doRunNotebookParallel(param, "2M4GWV7SQ", dependencyCheckModel,
                     username, runId,httpServletRequest)
@@ -606,11 +600,12 @@ class IngestFw(override val schemaName: String,
                   postProcess(status, dependencyCheckModel,
                     runNotebookParallelResult.getErrorSpecificMsg,
                     runId, sparkSession,
-                    runNotebookParallelResult.getNotebookUrl, runTime,
+                    runNotebookParallelResult.getNotebookUrl, jobStartTime,
                     LocalDateTime.now(), roundTime, postgresConnectionInfo, refDateIctrlDt, jobName,
                     "tbl_ingest_audit_logs", tblConfName,lastSuccessIctrlDt)
                   throw new RunNotebookParallelException(runNotebookParallelResult.getErrorMsg)
                 }
+                jobEndTime = LocalDateTime.now()
                 status = "SUCCEED"
                 stepRun = "FW RUN SCRIPTS INGESTION"
                 stepSeq = "FW:2"
@@ -621,8 +616,8 @@ class IngestFw(override val schemaName: String,
                   stepRunNext,stepSeqNext,postgresConnectionInfo,"tbl_ingest_audit_detail_logs",
                   "tbl_ingest_audit_detail_next_logs")
                 postProcess(status, dependencyCheckModel, runNotebookParallelResult.getErrorSpecificMsg,
-                  runId, sparkSession, runNotebookParallelResult.getNotebookUrl, runTime,
-                  LocalDateTime.now(), roundTime, postgresConnectionInfo, refDateIctrlDt, jobName,
+                  runId, sparkSession, runNotebookParallelResult.getNotebookUrl, jobStartTime,
+                  jobEndTime, roundTime, postgresConnectionInfo, refDateIctrlDt, jobName,
                   "tbl_ingest_audit_logs", tblConfName,lastSuccessIctrlDt)
                 sb.append(runNotebookParallelResult.getMessage)
                 if (catchUpType.equalsIgnoreCase(CATCHUP_TYPE.SEQUENCE.getValue)) {
@@ -639,7 +634,8 @@ class IngestFw(override val schemaName: String,
                     updateStateOfAuditLogByJobNameAndRoundTimeAndDagRun(
                       "FAILED",
                       dependencyCheckModel,runId,LocalDateTime.now(),
-                      roundTime,postgresConnectionInfo,exception.getMessage,"tbl_ingest_audit_logs",jobName)
+                      roundTime,postgresConnectionInfo,exception.getMessage,
+                      "tbl_ingest_audit_logs",jobName,refDateIctrlDt)
                   }
                   throw new Exception(exception.getMessage)
                 }
@@ -665,7 +661,7 @@ class IngestFw(override val schemaName: String,
       dependencyCheckModel.getModuleNotebookName,loadType,ingestType,taskGroupName)
     val sql = f"insert into ${this.schemaName}.tbl_ingest_audit_logs (job_nm,round_time," +
       f"dag_run_id,target_schema_nm,target_table_nm," +
-      f"job_start_time,ictrl_dt,start_ictrl_dt," +
+      f"custom_start_time,ictrl_dt,start_ictrl_dt," +
       f"end_ictrl_dt,status,zeppelin,load_type,ingestion_type,tasksgroup_nm) values (" +
       f"?,?,?,?,?,?,?," +
       f"?,?,'RUNNING'," +

@@ -145,9 +145,12 @@ object ConnectionService {
     connectionInfo.setPort(getValue("port"))
     connectionInfo.setDbName(getValue("db_name"))
     connectionInfo.setUserNm(getValue("user_nm"))
-    var password = EncryptDecrypt.decrypt(getValue("password"))
-    password = objectMapper.readTree(password).get("value").asText()
-    connectionInfo.setPassword(password)
+    if(getValue("password") != null) {
+      var password = EncryptDecrypt.decrypt(getValue("password"))
+      if(password != null)
+        password = objectMapper.readTree(password).get("value").asText()
+      connectionInfo.setPassword(password)
+    }
     connectionInfo.setDbType(getValue("db_type"))
     connectionInfo.setSid(getValue("SID"))
 

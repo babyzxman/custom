@@ -28,12 +28,9 @@ public class DependencyCheckCustomProd extends DefaultCustomService<DependencyCh
     @Autowired
     private HeraConfig heraConfig;
 
-    @Autowired
-    private TaskExecutor taskExecutor;
+    private TransformFw transformFw;
 
-    private final String salt = "rTYlPkZH37QOf7Xx1GzZ0hakdl/2/Z02HlPesDfQ2lM=";
-
-    private final String ultKey = "AdKX67Zn0JRJSGJQ7/4LrQOsZ0IW8+Fcdh7hpeJV8GeVNiPIs4i0RZ4T+XjXyEb0";
+    private IngestFw ingestFw;
 
     @PostConstruct
     void init() {
@@ -45,50 +42,15 @@ public class DependencyCheckCustomProd extends DefaultCustomService<DependencyCh
                 NewThreadExecutor.threadExecutor);
     }
 
-    private TransformFw transformFw;
-
-    private IngestFw ingestFw;
-
     private final GeneralService generalService = new GeneralService();
 
     @Override
     public Object execute(DependencyCheckModel params) throws Exception {
-        SparkSession sparkSession = SparkServer.getZeusSession().session();
-        JobConstant.JOB_TYPE jobType = null;
-        String queryMasterSql = "SELECT system,key,values FROM fwconfz.tbl_master_config where system = 'fw_postgre'";
-        ConnectionInfo postgresConnectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql, salt, ultKey);
-        if(params.getTaskGroupName() != null) {
-            jobType = generalService.checkJobTypeFromTaskGroup(
-                    params.getTaskGroupName(),sparkSession,"fwconfz");
-        }
-        else {
-            jobType = generalService.checkJobTypeFromJobName(
-                    params.getJobName(), "fwconfz",postgresConnectionInfo);
-        }
-        CustomFw customFw = getCustomFwClassByJobType(jobType);
-        ExecuteResponseWrap executeResponseWrap = new ExecuteResponseWrap();
-        executeResponseWrap.setExecuteResponseList(customFw.doRunTaskGroup(params,jobType));
-        return executeResponseWrap;
+        return generalService.doRunFrameWork(params,transformFw,ingestFw,"fwconfz");
     }
 
     @Override
     public DependencyCheckModel createParams() {
         return new DependencyCheckModel();
-    }
-
-    public CustomFw getCustomFwClassByJobType(JobConstant.JOB_TYPE jobType) {
-        switch (jobType) {
-            case OUTBOUND:
-            case TRANSFORM: {
-                return transformFw;
-            }
-            case INGEST_API:
-            case KAFKA:
-            case FILE:
-            case INGEST_DB: {
-                return ingestFw;
-            }
-        }
-        return null;
     }
 }

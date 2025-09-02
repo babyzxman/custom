@@ -23,13 +23,6 @@ public class DependencyCheckCustomTrueDev  extends DefaultCustomService<Dependen
     @Autowired
     private HeraConfig heraConfig;
 
-    @Autowired
-    private TaskExecutor taskExecutor;
-
-    private final String salt = "rTYlPkZH37QOf7Xx1GzZ0hakdl/2/Z02HlPesDfQ2lM=";
-
-    private final String ultKey = "AdKX67Zn0JRJSGJQ7/4LrQOsZ0IW8+Fcdh7hpeJV8GeVNiPIs4i0RZ4T+XjXyEb0";
-
     private TransformFw transformFw;
 
     private IngestFw ingestFw;
@@ -38,10 +31,10 @@ public class DependencyCheckCustomTrueDev  extends DefaultCustomService<Dependen
 
     @PostConstruct
     void init() {
-        transformFw = new TransformFw("fwconfz_truedev",
+        transformFw = new TransformFw("fwconfz_true_dev",
                 heraConfig.getHeraUrl(),loginUser, SparkServer.getZeusSession().session(),
                 NewThreadExecutor.threadExecutor);
-        ingestFw =  new IngestFw("fwconfz_truedev",
+        ingestFw =  new IngestFw("fwconfz_true_dev",
                 heraConfig.getHeraUrl(),loginUser, SparkServer.getZeusSession().session(),
                 NewThreadExecutor.threadExecutor);
     }
@@ -49,22 +42,7 @@ public class DependencyCheckCustomTrueDev  extends DefaultCustomService<Dependen
 
     @Override
     public Object execute(DependencyCheckModel params) throws Exception {
-        SparkSession sparkSession = SparkServer.getZeusSession().session();
-        JobConstant.JOB_TYPE jobType = null;
-        String queryMasterSql = "SELECT system,key,values FROM fwconfz_truedev.tbl_master_config where system = 'fw_postgre'";
-        ConnectionInfo postgresConnectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql, salt, ultKey);
-        if(params.getTaskGroupName() != null) {
-            jobType = generalService.checkJobTypeFromTaskGroup(
-                    params.getTaskGroupName(),sparkSession,"fwconfz_truedev");
-        }
-        else {
-            jobType = generalService.checkJobTypeFromJobName(
-                    params.getJobName(), "fwconfz_truedev",postgresConnectionInfo);
-        }
-        CustomFw customFw = getCustomFwClassByJobType(jobType);
-        ExecuteResponseWrap executeResponseWrap = new ExecuteResponseWrap();
-        executeResponseWrap.setExecuteResponseList(customFw.doRunTaskGroup(params,jobType));
-        return executeResponseWrap;
+        return generalService.doRunFrameWork(params,transformFw,ingestFw,"fwconfz_true_dev");
     }
 
     @Override

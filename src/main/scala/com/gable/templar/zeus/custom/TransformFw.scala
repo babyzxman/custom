@@ -41,6 +41,8 @@ class TransformFw(override val schemaName: String,
   def getVariableSchemaMapNameFromConstant: mutable.Map[String,String] = {
     val returnMap = mutable.Map.empty[String,String]
     for(schemaList <- SCHEMA_LIST.values()) {
+      if(schemaName.endsWith("_true_dev"))
+        returnMap.put(schemaList.getSchemaVariable,schemaList.getSchemaNameTrueDev)
       if(schemaName.endsWith("_uat"))
         returnMap.put(schemaList.getSchemaVariable,schemaList.getSchemaNameUat)
       else
@@ -68,9 +70,9 @@ class TransformFw(override val schemaName: String,
     val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
     val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
     val params = Seq(status, errorMsg, rowCount, logUrl,
-      durationString,jobEndTime, jobName, runId, ictrlDt, refDate)
+      durationString,jobEndTime,jobEndTime, jobName, runId, ictrlDt, refDate)
     val sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
-      f"err_msg = ?, row_cnt = ?, log_url = ?, duration = ?,job_end_time = ? " +
+      f"err_msg = ?, row_cnt = ?, log_url = ?, duration = ?,job_end_time = ?,custom_end_time = ? " +
       f"where job_nm = ? and dag_run_id = ? and ictrl_dt = ? " +
       f"and round_time = ?"
     ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,
@@ -79,7 +81,8 @@ class TransformFw(override val schemaName: String,
     if (status.equals("SUCCESS") && (lastSuccessIctrlDt == null || lastSuccessIctrlDt.toInt < ictrlDt.toInt)) {
       val sql = s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
         s"where job_nm = '${jobName}'"
-      ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+      ConnectionService.postgresqlInsertUpdateFunc(
+        connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
         connectionInfo.getUserNm, connectionInfo.getPassword, sql, Seq.empty)
     }
   }
@@ -100,7 +103,7 @@ class TransformFw(override val schemaName: String,
         val frequency = controlJobDf.getAs[String]("frequency")
         val backdate = controlJobDf.getAs[Any]("back_day")
         var currentLocalDateRun: LocalDateTime = null
-        val catchUpType = controlJobDf.getAs[String]("catchup_type")
+        var catchUpType = controlJobDf.getAs[String]("catchup_type")
         var ictrlDtTgtFmt = controlJobDf.getAs[String]("ictrl_dt_tgtfmt")
         val schemaNameFromTbl =  controlJobDf.getAs[String]("schema_nm")
         val tableName = controlJobDf.getAs[String]("table_nm")
@@ -111,6 +114,9 @@ class TransformFw(override val schemaName: String,
         }
         if(ictrlDtTgtFmt == null) {
           ictrlDtTgtFmt = "%Y%m%d"
+        }
+        if(catchUpType == null) {
+          catchUpType = CATCHUP_TYPE.SEQUENCE.getValue
         }
         val dateFormatIctrlDtForTb = convertPythonDateFormatToJava(ictrlDtTgtFmt)
         val timeRetry = controlJobDf.getAs[Int]("time_retry")
@@ -210,7 +216,11 @@ class TransformFw(override val schemaName: String,
                   else {
                     break()
                   }
+                  updateJobStatusAndErrorMessage(jobName,roundTime,runId,
+                    "tbl_trans_audit_logs",connectionInfo,"WAITING","wailting depen",refDateIctrlDt)
                   Thread.sleep(timeRetry * 1000)
+                  updateJobStatusAndErrorMessage(jobName,roundTime,runId,
+                    "tbl_trans_audit_logs",connectionInfo,"running",null,refDateIctrlDt)
                 }
               }
               var stepRun = "FW CHECK PREREQUISITE"
@@ -258,6 +268,10 @@ class TransformFw(override val schemaName: String,
                 param.put(schemaEntry.getKey,objectMapper.valueToTree(schemaEntry.getValue))
               }
               var runNotebookParallelResult: RunNotebookParallelResult = null
+              val jobStartTime: LocalDateTime = LocalDateTime.now()
+              updateJobStartTimeOfAuditLogByJobNameAndRoundTimeAndDagRun(
+                jobName,jobStartTime,roundTime,runId,
+                "tbl_ingest_audit_logs",connectionInfo,refDateIctrlDt)
               if(JOB_TYPE == JobConstant.JOB_TYPE.TRANSFORM) {
                 runNotebookParallelResult = doRunNotebookParallel(param,
                   controlJobDf.getAs[String]("script_path").trim, dependencyCheckModel,
@@ -269,19 +283,26 @@ class TransformFw(override val schemaName: String,
                   username, runId,httpServletRequest)
               }
               var status = "SUCCEED"
-              val isTmpTableExists = sparkSession.catalog.tableExists(f"$tmpzSchema.${jobName}_tmp_validation") && sparkSession.table(f"$tmpzSchema.${jobName}_tmp_validation").isEmpty
+              var isTmpTableExists = false
+              if(sparkSession.catalog.tableExists(f"$tmpzSchema.${jobName}_tmp_validation")) {
+                sparkSession.catalog.refreshTable(f"$tmpzSchema.${jobName}_tmp_validation")
+                isTmpTableExists = !sparkSession.table(f"$tmpzSchema.${jobName}_tmp_validation").isEmpty
+              }
               if (runNotebookParallelResult.getErrorMsg != null) {
                 status = "FAILED"
                 postProcess(status, dependencyCheckModel,
                   runNotebookParallelResult.getErrorSpecificMsg,
                   runId, sparkSession,
-                  runNotebookParallelResult.getNotebookUrl, runTime,
+                  runNotebookParallelResult.getNotebookUrl, jobStartTime,
                   LocalDateTime.now(), roundTime, connectionInfo, refDateIctrlDt, jobName,
                   "tbl_trans_audit_logs", tblConfName,lastSuccessIctrlDt,isTmpTableExists)
                 throw new RunNotebookParallelException(runNotebookParallelResult.getErrorMsg)
               }
-              val partitionCol: List[String] = scalaObjectMapper.readValue(
-                controlJobDf.getAs[String]("partition_column").replace("'", "\""), classOf[List[String]])
+              var partitionCol: List[String] = List.empty
+              if(controlJobDf.getAs[String]("partition_column") != null) {
+                partitionCol = scalaObjectMapper.readValue(
+                  controlJobDf.getAs[String]("partition_column").replace("'", "\""), classOf[List[String]])
+              }
               stepRun = "FW RUN SCRIPTS TRANSFORMATION"
               stepSeq = "FW:2"
               stepRunNext = "FW VALIDATION PROCESS"
@@ -312,7 +333,7 @@ class TransformFw(override val schemaName: String,
                   jobName, connectionInfo, sparkSession, tmpzSchema)
               }
               postProcess(status, dependencyCheckModel, runNotebookParallelResult.getErrorSpecificMsg,
-                runId, sparkSession, runNotebookParallelResult.getNotebookUrl, runTime,
+                runId, sparkSession, runNotebookParallelResult.getNotebookUrl, jobStartTime,
                 LocalDateTime.now(), roundTime, connectionInfo, refDateIctrlDt, jobName,
                 "tbl_trans_audit_logs", tblConfName,lastSuccessIctrlDt,isTmpTableExists)
               stepRun = "FW VALIDATION PROCESS"
@@ -345,7 +366,7 @@ class TransformFw(override val schemaName: String,
                     "FAILED",
                     dependencyCheckModel, runId, LocalDateTime.now(),
                     roundTime, connectionInfo, exception.getMessage, "tbl_trans_audit_logs",
-                    jobName)
+                    jobName,refDateIctrlDt)
                 }
                 throw new Exception(exception.getMessage)
               }
@@ -433,6 +454,8 @@ class TransformFw(override val schemaName: String,
     sparkBuilder.getOrCreate()
   }
 
+
+
   def checkDependencyByJobName(controlJobDf: Row,
                                masterRefDate: LocalDateTime,connectionInfo: ConnectionInfo,
                                refDateIctrlDt: String, startICtrlDt: String,
@@ -453,10 +476,18 @@ class TransformFw(override val schemaName: String,
         val activeFlag = r.getString("active_flag")
         val preReqSchemaNm = r.getString("prerequisite_schema_nm")
         val uatSchemaVariable = SCHEMA_LIST.schemaUatMap.get(preReqSchemaNm)
+        val trueDevSchemaVariable = SCHEMA_LIST.schemaTrueDevMap.get(preReqSchemaNm)
+        val prodSchemaVariable = SCHEMA_LIST.schemaMap.get(preReqSchemaNm)
         if(uatSchemaVariable != null) {
           schemaMap.put(uatSchemaVariable,preReqSchemaNm)
         }
-        if(activeFlag.equalsIgnoreCase("y")) {
+        if(trueDevSchemaVariable != null) {
+          schemaMap.put(trueDevSchemaVariable,preReqSchemaNm)
+        }
+        if(prodSchemaVariable != null) {
+          schemaMap.put(prodSchemaVariable,preReqSchemaNm)
+        }
+        if("y".equalsIgnoreCase(activeFlag)) {
           var seqList = checkLog(r.getString("prerequisite_job_nm"),preReqSchemaNm,
             r.getString("prerequisite_table_nm"),r.getString("frequency_check"),
             r.getObject("value"),r.getObject("empty_flag"),refDateIctrlDt,"tbl_trans_audit_logs",
