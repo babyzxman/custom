@@ -1,5 +1,7 @@
 package com.gable.templar.custom.view;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.sql.Timestamp;
 import java.util.List;
 
@@ -36,6 +38,8 @@ public class DependencyCheckModel {
     private Boolean runInTimeRange = false;
 
     private String notebookId;
+
+    private JsonNode sparkConf;
 
     public String getRunType() {
         return runType;
@@ -163,5 +167,13 @@ public class DependencyCheckModel {
 
     public void setJobNames(List<String> jobNames) {
         this.jobNames = jobNames;
+    }
+
+    public JsonNode getSparkConf() {
+        return sparkConf;
+    }
+
+    public void setSparkConf(JsonNode sparkConf) {
+        this.sparkConf = sparkConf;
     }
 }

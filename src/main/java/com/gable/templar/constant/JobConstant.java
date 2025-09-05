@@ -16,6 +16,7 @@ public class JobConstant {
         VAR_RFZCDR("rfzcdr","VAR_RFZCDR","rfzcdr_uat","rfzcdr_true_dev"),
         VAR_RFZLKP("rfzlkp","VAR_RFZLKP","rfzlkp_uat","rfzlkp_true_dev"),
         VAR_RFZNRT("rfznrt","VAR_RFZNRT","rfznrt_uat","rfznrt_true_dev"),
+        VAR_RFZNTWK("rfzntwk","VAR_RFZNTWK","rfzntwk_uat","rfzntwk_true_dev"),
         VAR_TMPZ("tmpz","VAR_TMPZ","tmpz_uat","tmpz_true_dev"),
         VAR_TMPOUTZ("tmpoutz","VAR_TMPOUTZ","tmpoutz_uat","tmpoutz_true_dev"),
         VAR_FWCONFZ("fwconfz","VAR_FWCONFZ","fwconfz_uat","fwconfz_true_dev");

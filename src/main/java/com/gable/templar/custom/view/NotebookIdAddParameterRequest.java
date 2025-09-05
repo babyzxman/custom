@@ -11,6 +11,8 @@ public class NotebookIdAddParameterRequest {
     private String jobName;
     private String parentNotebookId;
     private Map<String, Map<String, JsonNode>> addParameterMapFromTitle;
+    private JsonNode sparkConf;
+
     public void setNotebookName(String notebookName) {
         this.notebookName = notebookName;
     }
@@ -57,5 +59,13 @@ public class NotebookIdAddParameterRequest {
 
     public Map<String, String> getSpecificInterpreterGroupName() {
         return specificInterpreterGroupName;
+    }
+
+    public JsonNode getSparkConf() {
+        return sparkConf;
+    }
+
+    public void setSparkConf(JsonNode sparkConf) {
+        this.sparkConf = sparkConf;
     }
 }

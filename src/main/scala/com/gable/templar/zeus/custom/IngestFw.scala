@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import com.gable.templar.constant.JobConstant
 import com.gable.templar.constant.JobConstant.{CATCHUP_TYPE, LOAD_TYPE}
 import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse}
-import com.gable.templar.exception.{DropDuplicatesJobError, RunNotebookParallelException}
+import com.gable.templar.exception.{DropDuplicatesJobError, DropSuccessJobError, RunNotebookParallelException}
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.zeus.controller.model.LoginUser
 import com.gable.templar.zeus.service.vector.ConnectionInfo
@@ -157,12 +157,12 @@ class IngestFw(override val schemaName: String,
     ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,
       connectionInfo.getPort, connectionInfo.getDbName,
       connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
-    if (status.equals("SUCCESS") && (lastSuccessIctrlDt == null || lastSuccessIctrlDt.toInt < ictrlDt.toInt)){
-      val sql = s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
-        s"where job_nm = '${jobName}'"
-      ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
-        connectionInfo.getUserNm, connectionInfo.getPassword, sql, Seq.empty)
-    }
+//    if (status.equals("SUCCEED") && (lastSuccessIctrlDt == null || lastSuccessIctrlDt.toInt < ictrlDt.toInt)){
+//      val sql = s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
+//        s"where job_nm = '${jobName}'"
+//      ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+//        connectionInfo.getUserNm, connectionInfo.getPassword, sql, Seq.empty)
+//    }
   }
 
   def checkRunningIctrlDtIngest(jobNmUpdate: String, tasksgroupNmUpdate: String,
@@ -329,7 +329,7 @@ class IngestFw(override val schemaName: String,
             connectionInfo.getUserNm, connectionInfo.getPassword, queryDeleteLog
           )
           println("Delete audit log Complete")
-          throw new DropDuplicatesJobError(errMsg)
+          throw new DropSuccessJobError(errMsg)
         }
       }
       finally{
@@ -425,8 +425,11 @@ class IngestFw(override val schemaName: String,
           var processJobType: String = "ongoing"
           var origRefDate: LocalDateTime = null
           if (dependencyCheckModel.getFixedDate == null || dependencyCheckModel.getFixedDate.isEmpty) {
-            masterRefDate = minusDateByFrequency(dependencyCheckModel.get_bldStartDate().toLocalDateTime, frequency, backdate)
-            origRefDate = dependencyCheckModel.get_bldStartDate().toLocalDateTime
+            masterRefDate = minusDateByFrequency(
+              truncateToFormat(dependencyCheckModel.get_bldEndDate().
+                toLocalDateTime,dateFormatIctrlDtForTb),frequency,backdate)
+            origRefDate =  truncateToFormat(dependencyCheckModel.get_bldEndDate().
+              toLocalDateTime,dateFormatIctrlDtForTb)
           }
           else {
             masterRefDate = parseToLocalDateTime(dependencyCheckModel.getFixedDate, dateFormatIctrlDtForTb).get
@@ -951,21 +954,17 @@ class IngestFw(override val schemaName: String,
       }
 
       val prerequisiteTableCleaned = prerequisiteTable.split(" ")(0)
-
-      val baseQuery = if (logTable == "tbl_ingest_logs") {
-        s"select target_table_nm, job_start_time, ictrl_dt, status, row_cnt from $tblIngestAuditLogs " +
-          s"where upper(job_nm) = upper('$prerequisiteJobNameStr') and target_schema_nm = '$prerequisiteSchema' and target_table_nm = '$prerequisiteTableCleaned'"
-      } else {
-        s"select table_nm, job_start_time, ictrl_dt, status, row_cnt from $tblTauditLogs " +
-          s"where upper(job_nm) = upper('$prerequisiteJobNameStr') and schema_nm = '$prerequisiteSchema' and table_nm = '$prerequisiteTableCleaned'"
-      }
+      logger.info("tbl ingest audit logs = {}",tblIngestAuditLogs)
+      val baseQuery = s"select target_table_nm, job_start_time, ictrl_dt, status, row_cnt from $tblIngestAuditLogs " +
+        s"where upper(job_nm) = upper('$prerequisiteJobNameStr') and target_schema_nm = '$prerequisiteSchema' and target_table_nm = '$prerequisiteTableCleaned'"
 
       frequencyCheck match {
         case "daily" =>
           val targetDate = masterRefDate.format(DateTimeFormatter.ofPattern(patternIctrlDtCheck))
           val query = s"$baseQuery and ictrl_dt like '$targetDate%' order by job_start_time desc"
-
-          if (checkInDate == "logs" && (prerequisiteJobNm.isInstanceOf[String] &&
+          logger.info("check query daily ingest sql depen = {}",query)
+          if (checkInDate == "logs" && ((
+            prerequisiteJobNm.isInstanceOf[String] || prerequisiteJobNm.asInstanceOf[List[String]].size == 1) &&
             prerequisiteJobNameStr != null && !blackListNullString.contains(prerequisiteJobNameStr))) {
             val result = ConnectionService.postgresqlQueryDirectly(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
               postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm,
@@ -1207,8 +1206,9 @@ class IngestFw(override val schemaName: String,
       val map = checkLogIngestion(processResult._2, preReqSchemaNm,
         r.prerequisiteTableNm, r.frequencyCheck,
         Some(r.value), r.emptyFlag, r.dataColumn,
-        convertPythonDateFormatToJava(r.ictrlDtTgtfmt), convertPythonDateFormatToJava(controlJobDf.getAs[String]("ictrl_dt_tgtfmt")),
-        masterRefDate, f"$schemaName.tbl_ingest_audit_logs", connectionInfo.getIp, connectionInfo.getPort,
+        convertPythonDateFormatToJava(r.ictrlDtTgtfmt),
+        convertPythonDateFormatToJava(controlJobDf.getAs[String]("ictrl_dt_tgtfmt")),
+        masterRefDate, "tbl_ingest_logs", connectionInfo.getIp, connectionInfo.getPort,
         connectionInfo.getUserNm, connectionInfo.getPassword, connectionInfo.getSid,
         postgresConnectionInfo)
       returnJobMap.put(r.prerequisiteJobNm, map._1)

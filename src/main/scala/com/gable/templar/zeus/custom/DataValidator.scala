@@ -1,11 +1,14 @@
 package com.gable.templar.zeus.custom
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.zeus.service.vector.ConnectionInfo
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession, functions}
 import org.apache.spark.sql.functions.{avg, col, current_timestamp, expr, lit}
 import org.apache.spark.sql.types.IntegerType
+import org.slf4j.LoggerFactory
 
 import java.sql.ResultSet
 import java.util.UUID
@@ -13,6 +16,13 @@ import scala.util.Try
 import scala.util.matching.Regex
 
 object DataValidator {
+
+  private val logger = LoggerFactory.getLogger(DataValidator.getClass)
+
+  val scalaObjectMapper: ObjectMapper = new ObjectMapper()
+
+  scalaObjectMapper.registerModule(DefaultScalaModule)
+
 
   private val autoGenerateColName: Set[String] = Set("execution_id","process_name","dw_last_update_time")
 
@@ -226,15 +236,20 @@ object DataValidator {
     def upsertCondition(tmpValidationDF: DataFrame, targetTblName: String, uniqueKey: String, mergeCondition: Option[String],
                         updateColumn: List[String],spark: SparkSession): Unit = {
       val deltaTable = DeltaTable.forName(spark, targetTblName)
-
-      val uniqueKeyList = if (uniqueKey.startsWith("[") && uniqueKey.endsWith("]")) {
-        uniqueKey.stripPrefix("[").stripSuffix("]").split(",").map(_.trim.stripPrefix("'").stripSuffix("'")).toList
-      } else {
-        List(uniqueKey)
+      var uniqueKeyList : List[String] = List.empty
+      if(uniqueKey != null) {
+        uniqueKeyList = scalaObjectMapper.readValue(
+          uniqueKey.replace("'", "\""), classOf[List[String]])
       }
 
+      val mergeCond = mergeCondition.orNull
       val joinCondition = uniqueKeyList.map(key => s"trg.$key = src.$key").mkString(" AND ")
-      val fullMergeCondition = mergeCondition.map(cond => s"$joinCondition AND $cond").getOrElse(joinCondition)
+      val fullMergeCondition = if(mergeCond != null) {
+        s"$joinCondition AND $mergeCond"
+      }
+      else {
+        joinCondition
+      }
 
       val updateSetClause = if (updateColumn.nonEmpty) {
         updateColumn.filter(_ != "load_ts").map(c => (c, col(s"src.$c"))).toMap
@@ -255,7 +270,7 @@ object DataValidator {
         // We simply return the original mergeBuilder to continue chaining.
         mergeBuilder
       }
-
+      logger.info("merge condition = {}",fullMergeCondition)
       finalMergeStatement
         .whenNotMatched()
         .insert(insertSetClause)

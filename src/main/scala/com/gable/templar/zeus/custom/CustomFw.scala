@@ -5,7 +5,7 @@ import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.gable.templar.constant.JobConstant
 import com.gable.templar.constant.JobConstant.{JOB_TYPE, importParameter, initialTitle, manualTitle}
 import com.gable.templar.custom.view.{AirflowModelView, DependencyCheckModel, ExecuteResponse, NotebookCheckParallelRequest, NotebookIdAddParameterRequest, NotebookRunParallelRequest, NotebookRunParallelResponse, RunNotebookParallelResult}
-import com.gable.templar.exception.DropDuplicatesJobError
+import com.gable.templar.exception.{DropDuplicatesJobError, DropSuccessJobError}
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.heaven.util.{HTTPServletRequestUtil, RestTemplateFactoryUtil}
 import com.gable.templar.zeus.controller.model.LoginUser
@@ -80,6 +80,17 @@ trait CustomFw {
                                refDateIctrlDt: String, startICtrlDt: String,
                                postgresConnectionInfo: ConnectionInfo, jobName: String,
                                schemaMap:mutable.Map[String,String]): java.util.Map[String, Boolean]
+
+  def truncateToFormat(ldt: LocalDateTime, format: String): LocalDateTime = {
+    format match {
+      case "yyyyMM"       => ldt.withDayOfMonth(1).toLocalDate.atStartOfDay()
+      case "yyyyMMdd"     => ldt.toLocalDate.atStartOfDay()
+      case "yyyyMMddHH"   => ldt.truncatedTo(ChronoUnit.HOURS)
+      case "yyyyMMddHHmm" => ldt.truncatedTo(ChronoUnit.MINUTES)
+      case "yyyyMMddHHmmss" => ldt.truncatedTo(ChronoUnit.SECONDS)
+      case _ => throw new IllegalArgumentException(s"Unsupported format: $format")
+    }
+  }
 
   def parseToLocalDateTime(input: String, format: String): Option[LocalDateTime] = {
     try {
@@ -240,42 +251,45 @@ trait CustomFw {
         postgresConnectionInfo.getDbName,postgresConnectionInfo.getUserNm,
         postgresConnectionInfo.getPassword,query)
       val limiter = new Semaphore(CONCURRENT_SCHEDULE, true)
+      val errorMsg = new StringBuilder
+      var isFailed = false
       try {
         val taskGroupDf = rsToDataFrame(taskGroupConnection.rs, sparkSession)
         val jobMap = getSequenceAndJob(taskGroupDf)
         jobMap.foreach(j => {
           val completableFutureList = ArrayBuffer[CompletableFuture[ExecuteResponse]]()
           j._2.foreach(r => {
+            logger.info("job list = {}",r.getAs[String]("job_nm"))
             val executeResponse = new ExecuteResponse
             executeResponse.setJobName(r.getAs[String]("job_nm"))
             limiter.acquire()
             val cf = doRunFramework(dependencyCheckModel,
               jobType, r.getAs[String]("job_nm"), r, tblConfName, httpServletRequest, loginUser.getUsername,roundTime)
             cf.whenComplete((_, _) => limiter.release())
+              .whenComplete((res, err) => {
+                if (err != null) {
+                  isFailed = true
+                  errorMsg.append(err.getMessage)
+                }
+              })
             completableFutureList += cf
             executeResult.add(executeResponse)
           })
           val allOf = CompletableFuture.allOf(completableFutureList: _*)
-          allOf.join()
-          val errorMsg = new StringBuilder
-          var isFailed = false
-          for (completableFuture <- completableFutureList) {
-            try {
-              executeResult.add(completableFuture.get())
-            }
-            catch {
-              case exception: Exception => {
-                logger.error(exception.getMessage,exception)
-                isFailed = true
-                errorMsg.append(exception.getMessage)
-              }
-            }
-            if(isFailed) {
-              updateTaskgroupLogs(dependencyCheckModel.getTaskGroupName,taskStartTime,roundTime,"FAILED",postgresConnectionInfo)
-              throw new Exception(errorMsg.toString())
+          try {
+            allOf.join()
+          }
+          catch {
+            case exception: Exception => {
+              logger.error(exception.getMessage,exception)
+              isFailed = true
             }
           }
         })
+        if(isFailed) {
+          updateTaskgroupLogs(dependencyCheckModel.getTaskGroupName,taskStartTime,roundTime,"FAILED",postgresConnectionInfo)
+          throw new Exception(errorMsg.toString())
+        }
         updateTaskgroupLogs(dependencyCheckModel.getTaskGroupName,taskStartTime,roundTime,"SUCCESS",postgresConnectionInfo)
       }
       finally{
@@ -363,6 +377,7 @@ trait CustomFw {
     addParameterRequest.put(importParameter,param)
     notebookIdAddParameterRequest.setNotebookId(notebookId)
     notebookIdAddParameterRequest.setAddParameterMapFromTitle(addParameterRequest)
+    notebookIdAddParameterRequest.setSparkConf(dependencyCheckModel.getSparkConf)
     val notebookIdAddParameterRequestList: java.util.ArrayList[NotebookIdAddParameterRequest] = new util.ArrayList[NotebookIdAddParameterRequest]()
     notebookIdAddParameterRequestList.add(notebookIdAddParameterRequest)
     notebookRunParallelRequest.setNotebookAddParameterRequest(notebookIdAddParameterRequestList)
@@ -868,6 +883,7 @@ trait CustomFw {
                                       prerequisiteTableCleaned: String): (Boolean, Map[String, List[String]]) = {
     while(records.next()) {
       val status = records.getString(4)
+      logger.info("status = {}",status)
       val rowCnt = records.getLong(5)
       if (status == "SUCCEED" && rowCnt >= emptyFlag) {
         println("table is ready.")

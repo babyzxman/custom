@@ -78,7 +78,7 @@ class TransformFw(override val schemaName: String,
     ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,
       connectionInfo.getPort, connectionInfo.getDbName,
       connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
-    if (status.equals("SUCCESS") && (lastSuccessIctrlDt == null || lastSuccessIctrlDt.toInt < ictrlDt.toInt)) {
+    if (status.equals("SUCCEED") && (lastSuccessIctrlDt == null || lastSuccessIctrlDt.toInt < ictrlDt.toInt)) {
       val sql = s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
         s"where job_nm = '${jobName}'"
       ConnectionService.postgresqlInsertUpdateFunc(
@@ -94,8 +94,8 @@ class TransformFw(override val schemaName: String,
                               username: String,roundTime: LocalDateTime): CompletableFuture[ExecuteResponse]= {
     val completableFuture: CompletableFuture[ExecuteResponse] = CompletableFuture.supplyAsync(new Supplier[ExecuteResponse] {
       override def get(): ExecuteResponse =  {
-        if(dependencyCheckModel.get_bldStartDate() == null) {
-          dependencyCheckModel.set_bldStartDate(new Timestamp(System.currentTimeMillis()))
+        if(dependencyCheckModel.get_bldEndDate() == null) {
+          dependencyCheckModel.set_bldEndDate(new Timestamp(System.currentTimeMillis()))
         }
         if(dependencyCheckModel.getModuleNotebookName == null)
           dependencyCheckModel.setModuleNotebookName("zeppelin-se-uat-g")
@@ -126,7 +126,9 @@ class TransformFw(override val schemaName: String,
         val queryMasterSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = 'fw_postgre'"
         val connectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql,salt,ultKey)
         if(dependencyCheckModel.getFixedDate == null || dependencyCheckModel.getFixedDate.isEmpty) {
-          masterRefDate = minusDateByFrequency(dependencyCheckModel.get_bldStartDate().toLocalDateTime,frequency,backdate)
+          masterRefDate = minusDateByFrequency(
+            truncateToFormat(dependencyCheckModel.get_bldEndDate().
+              toLocalDateTime,dateFormatIctrlDtForTb),frequency,backdate)
         }
         else {
           try{
@@ -144,9 +146,7 @@ class TransformFw(override val schemaName: String,
         }
         else {
           currentLocalDateRun = parseToLocalDateTime(currentDateRun,dateFormatIctrlDtForTb).get
-          if(catchUpType.equals(CATCHUP_TYPE.SEQUENCE.getValue)) {
-            currentLocalDateRun = addDateByFrequency(currentLocalDateRun,frequency)
-          }
+          currentLocalDateRun = addDateByFrequency(currentLocalDateRun,frequency)
           if(currentLocalDateRun.isAfter(masterRefDate)) {
             currentLocalDateRun = masterRefDate
           }
@@ -189,9 +189,9 @@ class TransformFw(override val schemaName: String,
               startIctrlDt, endIctrlDt, roundTime, jobName,loadType,
               taskGroupName)
             try {
-              //          checkRunningIctrlDt(
-              //            dependencyCheckModel.getJobName,catchUpType, dateFormatIctrlDtForTb,
-              //            frequency,startRun,masterRefDate,connectionInfo,runId,roundTime)
+              checkRunningIctrlDt(
+                dependencyCheckModel.getJobName,catchUpType, dateFormatIctrlDtForTb,
+                frequency,currentLocalDateRun,masterRefDate,connectionInfo,runId,roundTime)
               var startDetailTime = LocalDateTime.now()
               val schemaMap = getVariableSchemaMapNameFromConstant
               breakable {
@@ -303,6 +303,11 @@ class TransformFw(override val schemaName: String,
                 partitionCol = scalaObjectMapper.readValue(
                   controlJobDf.getAs[String]("partition_column").replace("'", "\""), classOf[List[String]])
               }
+              var updateCondition: List[String] = List.empty
+              if(controlJobDf.getAs[String]("update_condition") != null) {
+                updateCondition = scalaObjectMapper.readValue(
+                  controlJobDf.getAs[String]("update_condition").replace("'", "\""), classOf[List[String]])
+              }
               stepRun = "FW RUN SCRIPTS TRANSFORMATION"
               stepSeq = "FW:2"
               stepRunNext = "FW VALIDATION PROCESS"
@@ -329,8 +334,9 @@ class TransformFw(override val schemaName: String,
                 DataValidator.insertToTargetMode(controlJobDf.getAs[String]("schema_nm"),
                   controlJobDf.getAs[String]("table_nm"), "tmp_validation",
                   controlJobDf.getAs[String]("load_type"), partitionCol, controlJobDf.
-                    getAs[String]("unique_key"), Some(controlJobDf.getAs[String]("update_condition")),
-                  jobName, connectionInfo, sparkSession, tmpzSchema)
+                    getAs[String]("unique_key"),
+                  Some(controlJobDf.getAs[String]("update_condition")),
+                  jobName, connectionInfo, sparkSession, tmpzSchema,updateCondition)
               }
               postProcess(status, dependencyCheckModel, runNotebookParallelResult.getErrorSpecificMsg,
                 runId, sparkSession, runNotebookParallelResult.getNotebookUrl, jobStartTime,
@@ -427,7 +433,7 @@ class TransformFw(override val schemaName: String,
     SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, schema_nm, table_nm, job_start_time, job_end_time, ictrl_dt as ictrl_dt, status
     FROM $schemaName.tbl_trans_audit_logs
     WHERE job_nm = '$jobName' AND ictrl_dt IN (${listICtrlDtQuery.mkString(",")}) AND status = 'RUNNING'
-    AND dag_run_id != '$dagRunId' AND round_time != '$roundTime' AND job_start_time >= NOW() - INTERVAL '$HOURS_CHECK_ROUND_TIME hours'
+    AND dag_run_id != '$dagRunId' AND round_time != '$roundTime'
     ORDER BY round_time DESC
     LIMIT 1
     """
@@ -534,10 +540,9 @@ class TransformFw(override val schemaName: String,
                 sparkSession: SparkSession
               ): (Boolean, Map[String, Seq[String]]) = {
 
-    println(s"Business column : $businessColumn")
+    logger.info(s"Business column : $businessColumn")
     val tblIngestAuditLogs = s"$schemaName.tbl_ingest_audit_logs"
     val tblTauditLogs = s"$schemaName.tbl_trans_audit_logs"
-    println(s"tbl_taudit_logs : $tblTauditLogs")
 
     val queryDict = Map(
       "tbl_ingest_audit_logs" -> s"SELECT target_table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblIngestAuditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND target_schema_nm = '{{prerequisite_schema}}' AND target_table_nm = '{{prerequisite_table}}' AND ictrl_dt = {{target_date}} ORDER BY job_start_time DESC",
@@ -547,13 +552,10 @@ class TransformFw(override val schemaName: String,
     var baseQuery: String = queryDict.getOrElse(logTable, throw new InvalidArgumentException(s"Unknown log table type: $logTable"))
 
     // Query for multi-day frequencies will use a different template
-    val queryDictMultiDay = Map(
-      "tbl_ingest_audit_logs" -> s"SELECT target_table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblIngestAuditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND target_schema_nm = '{{prerequisite_schema}}' AND target_table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC",
-      "tbl_trans_audit_logs" -> s"SELECT table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblTauditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND schema_nm = '{{prerequisite_schema}}' AND table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC"
-    )
 
     val checkInDate = if (businessColumn == null) "logs" else "raw_date"
-    println(s"Checking Type : $checkInDate")
+
+    logger.info("check date = {}",refDate)
 
     var targetDateQueryPart: String = ""
     var listDateTarget: List[String] = List.empty[String] // Dates expected to be present
@@ -631,6 +633,10 @@ class TransformFw(override val schemaName: String,
         }
 
       case "quarter" | "month_to_date" | "hour_to_date" | "daily_period" | "year_to_date" =>
+        val queryDictMultiDay = Map(
+          "tbl_ingest_audit_logs" -> s"SELECT target_table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblIngestAuditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND target_schema_nm = '{{prerequisite_schema}}' AND target_table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC",
+          "tbl_trans_audit_logs" -> s"SELECT table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblTauditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND schema_nm = '{{prerequisite_schema}}' AND table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC"
+        )
         baseQuery = queryDictMultiDay.getOrElse(logTable, throw new InvalidArgumentException(s"Unknown log table type: $logTable"))
 
         frequencyCheck match {
@@ -800,6 +806,10 @@ class TransformFw(override val schemaName: String,
         }
 
       case "max_date" =>
+        val queryDictMultiDay = Map(
+          "tbl_ingest_audit_logs" -> s"SELECT target_table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblIngestAuditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND target_schema_nm = '{{prerequisite_schema}}' AND target_table_nm = '{{prerequisite_table}}' {{target_date}} ORDER BY job_start_time DESC",
+          "tbl_trans_audit_logs" -> s"SELECT table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblTauditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND schema_nm = '{{prerequisite_schema}}' AND table_nm = '{{prerequisite_table}}' {{target_date}} ORDER BY job_start_time DESC"
+        )
         baseQuery = queryDictMultiDay.getOrElse(logTable, throw new InvalidArgumentException(s"Unknown log table type: $logTable"))
 
         val dateQueryStr = masterRefDate.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))
@@ -899,7 +909,11 @@ class TransformFw(override val schemaName: String,
 //        }
 
       case "date_range" =>
-        baseQuery = queryDictMultiDay.getOrElse(logTable, throw new InvalidArgumentException(s"Unknown log table type: $logTable"))
+        val queryDict = Map(
+          "tbl_ingest_audit_logs" -> s"SELECT target_table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblIngestAuditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND target_schema_nm = '{{prerequisite_schema}}' AND target_table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC",
+          "tbl_trans_audit_logs" -> s"SELECT table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblTauditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND schema_nm = '{{prerequisite_schema}}' AND table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC"
+        )
+        baseQuery = queryDict.getOrElse(logTable, throw new InvalidArgumentException(s"Unknown log table type: $logTable"))
 
         val dateRun = masterRefDate
         val multiEndDate = masterRefDate
@@ -956,6 +970,10 @@ class TransformFw(override val schemaName: String,
         }
 
       case "date_in_range" =>
+        val queryDictMultiDay = Map(
+          "tbl_ingest_audit_logs" -> s"SELECT target_table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblIngestAuditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND target_schema_nm = '{{prerequisite_schema}}' AND target_table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC",
+          "tbl_trans_audit_logs" -> s"SELECT table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblTauditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND schema_nm = '{{prerequisite_schema}}' AND table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC"
+        )
         baseQuery = queryDictMultiDay.getOrElse(logTable, throw new InvalidArgumentException(s"Unknown log table type: $logTable"))
 
         val dateRun = masterRefDate
