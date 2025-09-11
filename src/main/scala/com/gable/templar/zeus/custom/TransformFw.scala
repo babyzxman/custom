@@ -127,7 +127,7 @@ class TransformFw(override val schemaName: String,
                                           refDateIctrlDt: String,
                                           connectionInfo: ConnectionInfo,dependencyCheckModel: DependencyCheckModel,
                                           httpServletRequest: HttpServletRequest,username: String,overlap: Any,
-                                          frequency: String) : RunNotebookParallelResult = {
+                                          frequency: String,ictrlDtTgtfmt: String) : RunNotebookParallelResult = {
     val param: java.util.HashMap[String, JsonNode] = new util.HashMap[String, JsonNode]()
     param.put("job_nm", objectMapper.valueToTree(jobName))
     param.put("tasksgroup_nm", objectMapper.valueToTree(taskGroupName))
@@ -135,7 +135,8 @@ class TransformFw(override val schemaName: String,
     param.put("ictrl_dt", objectMapper.valueToTree(refDateIctrlDt))
     param.put("start_ictrl_dt", objectMapper.valueToTree(refDateIctrlDt))
     param.put("end_ictrl_dt", objectMapper.valueToTree(refDateIctrlDt))
-    param.put("start_ictrl_dt_w_overlap", objectMapper.valueToTree(calOverLap(currentLocalDateRun,overlap,frequency)))
+    param.put("start_ictrl_dt_w_overlap", objectMapper.valueToTree(
+      calOverLap(currentLocalDateRun,overlap,frequency).format(DateTimeFormatter.ofPattern(ictrlDtTgtfmt))))
     param.put("end_ictrl_dt_w_overlap", objectMapper.valueToTree(refDateIctrlDt))
     param.put("round_time",objectMapper.valueToTree(roundTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS"))))
     if(controlJobDf.getAs[String]("ictrl_dt_type") != null)
@@ -554,7 +555,7 @@ class TransformFw(override val schemaName: String,
                   jobName, taskGroupName, controlJobDf, runId, roundTime, currentLocalDateRun,
                   refDateIctrlDt, connectionInfo,
                   dependencyCheckModel, httpServletRequest, username,
-                  overlapTime, frequency)
+                  overlapTime, frequency,dateFormatIctrlDtForTb)
                 if (runNotebookParallelResult.getErrorMsg != null) {
                   status = "FAILED"
                   val failedList: util.ArrayList[String] = new util.ArrayList
