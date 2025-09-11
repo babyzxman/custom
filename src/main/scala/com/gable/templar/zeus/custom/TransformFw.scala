@@ -3,13 +3,17 @@ package com.gable.templar.zeus.custom
 import com.fasterxml.jackson.databind.JsonNode
 import com.gable.templar.constant.JobConstant
 import com.gable.templar.constant.JobConstant.{CATCHUP_TYPE, JOB_TYPE, LOAD_TYPE, SCHEMA_LIST}
-import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse, RunNotebookParallelResult}
+import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse, RunNotebookParallelResult, RunParallelResult}
 import com.gable.templar.exception.RunNotebookParallelException
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.heaven.util.RestTemplateFactoryUtil
 import com.gable.templar.zeus.SparkServer
 import com.gable.templar.zeus.controller.model.LoginUser
+import com.gable.templar.zeus.controller.tablemanage.view.PartitionCondition
+import com.gable.templar.zeus.service.spark.TableManageService.PATH_SEPERATOR
+import com.gable.templar.zeus.service.spark.{PartitionKey, SparkHiveMetaStoreService, TableManageService}
 import com.gable.templar.zeus.service.vector.ConnectionInfo
+import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.slf4j.LoggerFactory
 import org.springframework.core.task.TaskExecutor
@@ -34,7 +38,9 @@ class TransformFw(override val schemaName: String,
                   override val heraUrl: String,
                   override val loginUser: LoginUser,
                   override val sparkSession: SparkSession,
-                  override val taskExecutor: TaskExecutor) extends CustomFw {
+                  override val taskExecutor: TaskExecutor,
+                  val tableService: TableManageService,
+                  val sparkHiveMetaStoreService: SparkHiveMetaStoreService) extends CustomFw {
 
   private val logger = LoggerFactory.getLogger(classOf[TransformFw])
 
@@ -43,7 +49,7 @@ class TransformFw(override val schemaName: String,
     for(schemaList <- SCHEMA_LIST.values()) {
       if(schemaName.endsWith("_true_dev"))
         returnMap.put(schemaList.getSchemaVariable,schemaList.getSchemaNameTrueDev)
-      if(schemaName.endsWith("_uat"))
+      else if(schemaName.endsWith("_uat"))
         returnMap.put(schemaList.getSchemaVariable,schemaList.getSchemaNameUat)
       else
         returnMap.put(schemaList.getSchemaVariable,schemaList.getSchemaName)
@@ -54,22 +60,20 @@ class TransformFw(override val schemaName: String,
   def postProcess(status: String,
                   dependencyCheckModel: DependencyCheckModel,
                   errorMsg: String,
-                  runId: String, sparkSession: SparkSession, logUrl: String,
+                  runId: String, sparkSession: SparkSession,
+                  runParallelResult: RunParallelResult,
                   jobStartTime: LocalDateTime, jobEndTime: LocalDateTime,
                   refDate: LocalDateTime, connectionInfo: ConnectionInfo,
                   ictrlDt: String, jobName: String, tblLogName: String,
                   tblConfName: String,lastSuccessIctrlDt: String,
-                  isTmpTableExists: Boolean): Unit = {
+                  rowCount: Long): Unit = {
     val duration = Duration.between(jobStartTime, jobEndTime)
-    var rowCount = 0L
-    if(isTmpTableExists && status == "SUCCEED") {
-      rowCount = sparkSession.table(f"$tmpzSchema.${jobName}_tmp_validation").count()
-    }
     val hours = duration.toHours
     val minutes = duration.minusHours(hours).toMinutes
     val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
     val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
-    val params = Seq(status, errorMsg, rowCount, logUrl,
+    val params = Seq(status, errorMsg, rowCount,
+      objectMapper.writeValueAsString(runParallelResult),
       durationString,jobEndTime,jobEndTime, jobName, runId, ictrlDt, refDate)
     val sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
       f"err_msg = ?, row_cnt = ?, log_url = ?, duration = ?,job_end_time = ?,custom_end_time = ? " +
@@ -85,6 +89,112 @@ class TransformFw(override val schemaName: String,
         connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
         connectionInfo.getUserNm, connectionInfo.getPassword, sql, Seq.empty)
     }
+  }
+
+  def doRunNotebookParallelInMain(jobName: String,taskGroupName:String, controlJobDf: Row,runId:String,
+                                  roundTime: LocalDateTime,masterRefDate: LocalDateTime,currentLocalDateRun: LocalDateTime,
+                                  refDateIctrlDt: String,schemaMap: mutable.Map[String,String],
+                                  connectionInfo: ConnectionInfo, JOB_TYPE: JOB_TYPE,dependencyCheckModel: DependencyCheckModel,
+                                  httpServletRequest: HttpServletRequest,username: String,overlap: Any,
+                                  frequency: String) : RunNotebookParallelResult = {
+    val param: java.util.HashMap[String, JsonNode] = new util.HashMap[String, JsonNode]()
+    val specArg: util.ArrayList[String] = new util.ArrayList[String]
+    specArg.add(refDateIctrlDt)
+    specArg.add(jobName)
+    specArg.add(taskGroupName)
+    specArg.add(controlJobDf.getAs[String]("schema_nm"))
+    specArg.add(controlJobDf.getAs[String]("table_nm"))
+    specArg.add(runId)
+    specArg.add(controlJobDf.getAs[String]("load_type"))
+    specArg.add(roundTime.format(DateTimeFormatter.ofPattern(
+      "yyyy-MM-dd HH:mm:ss.SSSSSS")))
+    specArg.add(masterRefDate.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS")))
+    specArg.add(calOverLap(currentLocalDateRun,overlap,frequency).toString)
+    specArg.add(masterRefDate.toString)
+    if (controlJobDf.getAs[String]("specific_argument") != null) {
+      val newArgs = controlJobDf.getAs[String]("specific_argument").replace("'", "\"")
+      val specificArg = scalaObjectMapper.readValue(
+        newArgs, classOf[List[Any]])
+      if (specificArg.nonEmpty) {
+        specArg.add(specificArg.get(0).toString)
+      }
+      else {
+        specArg.add("1")
+      }
+    }
+    else {
+      specArg.add("1")
+    }
+    param.put("fix_date", objectMapper.valueToTree(refDateIctrlDt))
+    param.put("back_date", objectMapper.valueToTree(0))
+    param.put("job_name", objectMapper.valueToTree(jobName))
+    param.put("spec_arg", objectMapper.valueToTree(specArg))
+    for(schemaEntry <- schemaMap.entrySet()) {
+      param.put(schemaEntry.getKey,objectMapper.valueToTree(schemaEntry.getValue))
+    }
+    val runNotebookParallelResult: RunNotebookParallelResult = null
+    val jobStartTime: LocalDateTime = LocalDateTime.now()
+    updateJobStartTimeOfAuditLogByJobNameAndRoundTimeAndDagRun(
+      jobName,jobStartTime,roundTime,runId,
+      "tbl_ingest_audit_logs",connectionInfo,refDateIctrlDt)
+    if(JOB_TYPE == JobConstant.JOB_TYPE.TRANSFORM) {
+      return doRunNotebookParallel(param,
+        controlJobDf.getAs[String]("script_path").trim, dependencyCheckModel,
+        username, runId,httpServletRequest)
+    }
+    else if(JOB_TYPE == JobConstant.JOB_TYPE.OUTBOUND) {
+      return doRunNotebookParallel(param,
+        "", dependencyCheckModel,
+        username, runId,httpServletRequest)
+    }
+    runNotebookParallelResult
+  }
+
+  def getTablePartitionDropList(partitionConds: List[PartitionCondition],
+                                tableName: String,
+                                partitionKeys: List[PartitionKey]): List[String] = {
+    val partitionKeysName = partitionKeys.map(_.name)
+    var ptConditionsGroup = Map[String, List[PartitionCondition]]()
+    if (null != partitionConds && partitionConds.nonEmpty) {
+      ptConditionsGroup = partitionConds.groupBy(_.getName)
+      ptConditionsGroup.keys.foreach(ptCondName => {
+        if (!partitionKeysName.contains(ptCondName)) {
+          throw new IllegalArgumentException(s"partition condition name ${ptCondName} is not defined as table partitions")
+        }
+      })
+    }
+    var dropPartitionList = List[String]()
+    if (null != partitionKeys && partitionKeys.nonEmpty) {
+      dropPartitionList = tableService.listPartitionsByFilter(tableName, ptConditionsGroup, partitionKeys)
+    }
+    dropPartitionList
+  }
+
+  def deletePartition(path: String,
+                      partitionConds:List[PartitionCondition],
+                      tableName: String,sparkSession: SparkSession,
+                      partitionKeys: List[PartitionKey],
+                      dropPartitionList: List[String]): Unit = {
+    val partitionKeysName = partitionKeys.map(_.name)
+    var ptConditionsGroup = Map[String, List[PartitionCondition]]()
+    if (null != partitionConds && partitionConds.nonEmpty) {
+      ptConditionsGroup = partitionConds.groupBy(_.getName)
+      ptConditionsGroup.keys.foreach(ptCondName => {
+        if (!partitionKeysName.contains(ptCondName)) {
+          throw new IllegalArgumentException(s"partition condition name ${ptCondName} is not defined as table partitions")
+        }
+      })
+    }
+    if (null != partitionKeys && partitionKeys.nonEmpty) {
+      dropPartitionList.foreach(partToDrop => {
+        //				zeusSession.sql(s"ALTER table ${tableName} DROP IF EXISTS partition (${partToDrop.replaceAll("/", ",")})")
+        sparkSession.sql(s"ALTER table ${tableName} DROP IF EXISTS partition (${tableService.convertToPartitionSql(partToDrop)})")
+      })
+    }
+    val deletedSrcPaths = dropPartitionList.map(partToDrop => path + PATH_SEPERATOR + partToDrop)
+    deletedSrcPaths.foreach(p => {
+      SparkServer.getStoreUtil().delete(p,true)
+    })
   }
 
   override def doRunFramework(dependencyCheckModel: DependencyCheckModel,
@@ -109,6 +219,9 @@ class TransformFw(override val schemaName: String,
         val tableName = controlJobDf.getAs[String]("table_nm")
         val loadType = controlJobDf.getAs[String]("load_type")
         var taskGroupName = controlJobDf.getAs[String]("tasksgroup_nm")
+        val backlogTime = controlJobDf.getAs[Int]("backlog_time")
+        val partitionCondMaster = controlJobDf.getAs[String]("partition_condition")
+        val overlapTime = controlJobDf.getAs[Any]("overlap")
         if(taskGroupName == null ) {
           taskGroupName = ""
         }
@@ -151,7 +264,6 @@ class TransformFw(override val schemaName: String,
             currentLocalDateRun = masterRefDate
           }
         }
-        currentLocalDateRun = calOverLap(currentLocalDateRun,controlJobDf.getAs[Any]("overlap"),frequency)
         val startIctrlDt = currentLocalDateRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
         val endIctrlDt = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
         val sb = new StringBuilder()
@@ -232,71 +344,72 @@ class TransformFw(override val schemaName: String,
                 stepRunNext,stepSeqNext,connectionInfo,"tbl_trans_audit_detail_logs",
                 "tbl_trans_audit_detail_next_logs")
               startDetailTime = LocalDateTime.now()
-              val param: java.util.HashMap[String, JsonNode] = new util.HashMap[String, JsonNode]()
-              val specArg: util.ArrayList[String] = new util.ArrayList[String]
-              specArg.add(refDateIctrlDt)
-              specArg.add(jobName)
-              specArg.add(taskGroupName)
-              specArg.add(controlJobDf.getAs[String]("schema_nm"))
-              specArg.add(controlJobDf.getAs[String]("table_nm"))
-              specArg.add(runId)
-              specArg.add(controlJobDf.getAs[String]("load_type"))
-              specArg.add(roundTime.format(DateTimeFormatter.ofPattern(
-                "yyyy-MM-dd HH:mm:ss.SSSSSS")))
-              specArg.add(masterRefDate.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS")))
-              specArg.add(currentLocalDateRun.toString)
-              specArg.add(masterRefDate.toString)
-              if (controlJobDf.getAs[String]("specific_argument") != null) {
-                val newArgs = controlJobDf.getAs[String]("specific_argument").replace("'", "\"")
-                val specificArg = scalaObjectMapper.readValue(
-                  newArgs, classOf[List[Any]])
-                if (specificArg.nonEmpty) {
-                  specArg.add(specificArg.get(0).toString)
-                }
-                else {
-                  specArg.add("1")
+              var status = "SUCCEED"
+              var isTmpTableExists = false
+              val jobStartTime: LocalDateTime = LocalDateTime.now()
+              val runParallelResult: RunParallelResult = new RunParallelResult
+              var partitionConditionList: List[PartitionCondition] = List.empty
+              if(partitionCondMaster != null) {
+                partitionConditionList = PartitionParsers.parseAnd(partitionCondMaster)
+              }
+              if(backlogTime != null && backlogTime != 0) {
+                val successList: util.ArrayList[String] = new util.ArrayList
+                runParallelResult.setSuccessList(successList)
+                for(countRemove <- 0 to backlogTime) {
+                  val localDateRun = minusDateByFrequency(ictrlDtRun,frequency,backlogTime - countRemove)
+                  val refIctrlDt = ictrlDtRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
+                  val runNotebookParallelResult = doRunNotebookParallelInMain(
+                    jobName,taskGroupName,controlJobDf,runId,roundTime,masterRefDate,
+                    localDateRun,refIctrlDt,schemaMap,connectionInfo,JOB_TYPE,
+                    dependencyCheckModel,httpServletRequest,username,overlapTime,frequency)
+                  if(runNotebookParallelResult.getErrorMsg != null) {
+                    status = "FAILED"
+                    val failedList: util.ArrayList[String] = new util.ArrayList
+                    failedList.add(runNotebookParallelResult.getNotebookUrl)
+                    runParallelResult.setFailedList(failedList)
+                    postProcess(status, dependencyCheckModel,
+                      runNotebookParallelResult.getErrorSpecificMsg,
+                      runId, sparkSession,
+                      runParallelResult, jobStartTime,
+                      LocalDateTime.now(), roundTime, connectionInfo, refDateIctrlDt, jobName,
+                      "tbl_trans_audit_logs", tblConfName,lastSuccessIctrlDt,0L)
+                    throw new RunNotebookParallelException(runNotebookParallelResult.getErrorMsg)
+                  }
+                  else {
+                    sb.append(runNotebookParallelResult.getMessage)
+                    successList.add(runNotebookParallelResult.getNotebookUrl)
+                  }
                 }
               }
               else {
-                specArg.add("1")
+                val successList: util.ArrayList[String] = new util.ArrayList
+                val runNotebookParallelResult = doRunNotebookParallelInMain(
+                  jobName,taskGroupName,controlJobDf,runId,roundTime,masterRefDate,currentLocalDateRun,
+                  refDateIctrlDt,schemaMap,connectionInfo,JOB_TYPE,
+                  dependencyCheckModel,httpServletRequest,username,
+                  overlapTime,frequency)
+                if(runNotebookParallelResult.getErrorMsg != null) {
+                  status = "FAILED"
+                  val failedList: util.ArrayList[String] = new util.ArrayList
+                  failedList.add(runNotebookParallelResult.getNotebookUrl)
+                  postProcess(status, dependencyCheckModel,
+                    runNotebookParallelResult.getErrorSpecificMsg,
+                    runId, sparkSession,
+                    runParallelResult, jobStartTime,
+                    LocalDateTime.now(), roundTime, connectionInfo, refDateIctrlDt, jobName,
+                    "tbl_trans_audit_logs", tblConfName,lastSuccessIctrlDt,0L)
+                  throw new RunNotebookParallelException(runNotebookParallelResult.getErrorMsg)
+                }
+                sb.append(runNotebookParallelResult.getMessage)
+                successList.add(runNotebookParallelResult.getNotebookUrl)
+                runParallelResult.setSuccessList(successList)
               }
-              param.put("fix_date", objectMapper.valueToTree(refDateIctrlDt))
-              param.put("back_date", objectMapper.valueToTree(0))
-              param.put("job_name", objectMapper.valueToTree(jobName))
-              param.put("spec_arg", objectMapper.valueToTree(specArg))
-              for(schemaEntry <- schemaMap.entrySet()) {
-                param.put(schemaEntry.getKey,objectMapper.valueToTree(schemaEntry.getValue))
-              }
-              var runNotebookParallelResult: RunNotebookParallelResult = null
-              val jobStartTime: LocalDateTime = LocalDateTime.now()
-              updateJobStartTimeOfAuditLogByJobNameAndRoundTimeAndDagRun(
-                jobName,jobStartTime,roundTime,runId,
-                "tbl_ingest_audit_logs",connectionInfo,refDateIctrlDt)
-              if(JOB_TYPE == JobConstant.JOB_TYPE.TRANSFORM) {
-                runNotebookParallelResult = doRunNotebookParallel(param,
-                  controlJobDf.getAs[String]("script_path").trim, dependencyCheckModel,
-                  username, runId,httpServletRequest)
-              }
-              else if(JOB_TYPE == JobConstant.JOB_TYPE.OUTBOUND) {
-                runNotebookParallelResult = doRunNotebookParallel(param,
-                  "", dependencyCheckModel,
-                  username, runId,httpServletRequest)
-              }
-              var status = "SUCCEED"
-              var isTmpTableExists = false
-              if(sparkSession.catalog.tableExists(f"$tmpzSchema.${jobName}_tmp_validation")) {
-                sparkSession.catalog.refreshTable(f"$tmpzSchema.${jobName}_tmp_validation")
-                isTmpTableExists = !sparkSession.table(f"$tmpzSchema.${jobName}_tmp_validation").isEmpty
-              }
-              if (runNotebookParallelResult.getErrorMsg != null) {
-                status = "FAILED"
-                postProcess(status, dependencyCheckModel,
-                  runNotebookParallelResult.getErrorSpecificMsg,
-                  runId, sparkSession,
-                  runNotebookParallelResult.getNotebookUrl, jobStartTime,
-                  LocalDateTime.now(), roundTime, connectionInfo, refDateIctrlDt, jobName,
-                  "tbl_trans_audit_logs", tblConfName,lastSuccessIctrlDt,isTmpTableExists)
-                throw new RunNotebookParallelException(runNotebookParallelResult.getErrorMsg)
+
+              var processCount = 0L
+              val whereCondition = DataValidator.generateWhereConditionFromPartitionCondition(partitionConditionList)
+              if(sparkSession.catalog.tableExists(f"$tmpzSchema.${tableName}_tmp_validation")) {
+                sparkSession.catalog.refreshTable(f"$tmpzSchema.${tableName}_tmp_validation")
+                isTmpTableExists = !sparkSession.table(f"$tmpzSchema.${tableName}_tmp_validation").isEmpty
               }
               var partitionCol: List[String] = List.empty
               if(controlJobDf.getAs[String]("partition_column") != null) {
@@ -318,6 +431,10 @@ class TransformFw(override val schemaName: String,
                 "tbl_trans_audit_detail_next_logs")
               startDetailTime = LocalDateTime.now()
               if(isTmpTableExists) {
+                val partitionKeys = sparkHiveMetaStoreService.getPartitionKeys(f"$tmpzSchema.${tableName}_tmp_validation")
+                val dropPartitionList = getTablePartitionDropList(partitionConditionList,
+                  f"$tmpzSchema.${tableName}_tmp_validation",partitionKeys)
+                processCount = sparkSession.sql(f"select * from $tmpzSchema.${tableName}_tmp_validation $whereCondition").count()
                 val sql = f"select job_nm,schema_nm,tbl_nm,rule_nm,rule_calc," +
                   f"rule_calc_apply_col,expect_value,operation,sql_calc,sql_calc_apply," +
                   f"validate_mode,margin_pct,validate_seq  from $schemaName.tbl_validation " +
@@ -326,22 +443,29 @@ class TransformFw(override val schemaName: String,
                   , connectionInfo.getDbName, connectionInfo.getUserNm, connectionInfo.getPassword, sql)
                 try {
                   DataValidator.processValidationRows(sparkSession, validateDf.rs,
-                    "_tmp_validation", loadType)
+                    "_tmp_validation", loadType,whereCondition)
                 }
                 finally {
                   validateDf.close()
                 }
+                val location =
+                  sparkSession.sessionState.catalog.getTableMetadata(
+                    TableIdentifier(f"${tableName}_tmp_validation",Some(tmpzSchema))).location
                 DataValidator.insertToTargetMode(controlJobDf.getAs[String]("schema_nm"),
                   controlJobDf.getAs[String]("table_nm"), "tmp_validation",
                   controlJobDf.getAs[String]("load_type"), partitionCol, controlJobDf.
                     getAs[String]("unique_key"),
                   Some(controlJobDf.getAs[String]("update_condition")),
-                  jobName, connectionInfo, sparkSession, tmpzSchema,updateCondition)
+                  jobName, connectionInfo, sparkSession, tmpzSchema,updateCondition,
+                  whereCondition,location.toString,partitionKeys,dropPartitionList)
+                deletePartition(location.toString,partitionConditionList,
+                  f"$tmpzSchema.${tableName}_tmp_validation",sparkSession,
+                  partitionKeys,dropPartitionList)
               }
-              postProcess(status, dependencyCheckModel, runNotebookParallelResult.getErrorSpecificMsg,
-                runId, sparkSession, runNotebookParallelResult.getNotebookUrl, jobStartTime,
+              postProcess(status, dependencyCheckModel, null,
+                runId, sparkSession, runParallelResult, jobStartTime,
                 LocalDateTime.now(), roundTime, connectionInfo, refDateIctrlDt, jobName,
-                "tbl_trans_audit_logs", tblConfName,lastSuccessIctrlDt,isTmpTableExists)
+                "tbl_trans_audit_logs", tblConfName,lastSuccessIctrlDt,processCount)
               stepRun = "FW VALIDATION PROCESS"
               stepSeq = "FW:3"
               stepRunNext = "FW NOTIFICATION SENT"
@@ -356,7 +480,6 @@ class TransformFw(override val schemaName: String,
 //                controlJobDf.getAs[String]("noti_enable"), delay_flag = delay_flag,
 //                last_delay_day = last_delay_day, web_hook_url = '',
 //                sender = '', password = '', recipients = '', mode = job_type)
-              sb.append(runNotebookParallelResult.getMessage)
               if (catchUpType.equalsIgnoreCase(CATCHUP_TYPE.SEQUENCE.getValue)) {
                 currentLocalDateRun = addDateByFrequency(currentLocalDateRun, frequency)
                 if (currentLocalDateRun.isAfter(masterRefDate)) {
@@ -484,6 +607,7 @@ class TransformFw(override val schemaName: String,
         val uatSchemaVariable = SCHEMA_LIST.schemaUatMap.get(preReqSchemaNm)
         val trueDevSchemaVariable = SCHEMA_LIST.schemaTrueDevMap.get(preReqSchemaNm)
         val prodSchemaVariable = SCHEMA_LIST.schemaMap.get(preReqSchemaNm)
+        val trueSandboxSchemaVariable = SCHEMA_LIST.schemaTrueSandboxMap.get(preReqSchemaNm)
         if(uatSchemaVariable != null) {
           schemaMap.put(uatSchemaVariable,preReqSchemaNm)
         }
@@ -492,6 +616,9 @@ class TransformFw(override val schemaName: String,
         }
         if(prodSchemaVariable != null) {
           schemaMap.put(prodSchemaVariable,preReqSchemaNm)
+        }
+        if(trueSandboxSchemaVariable != null) {
+          schemaMap.put(trueSandboxSchemaVariable,preReqSchemaNm)
         }
         if("y".equalsIgnoreCase(activeFlag)) {
           var seqList = checkLog(r.getString("prerequisite_job_nm"),preReqSchemaNm,

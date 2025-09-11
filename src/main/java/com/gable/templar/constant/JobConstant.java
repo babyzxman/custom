@@ -6,20 +6,24 @@ import java.util.Map;
 public class JobConstant {
 
     public enum SCHEMA_LIST {
-        VAR_RWZBTCH("rwzbtch","VAR_RWZBTCH","rwzbtch_uat","rwzbtch_true_dev"),
-        VAR_RWZCDR("rwzcdr","VAR_RWZCDR","rwzcdr_uat","rwzcdr_true_dev"),
-        VAR_RWZMR("rwzmr","VAR_RWZMR","rwzmr_uat","rwzmr_true_dev"),
-        VAR_RWZRLTM("rwzrltm","VAR_RWZRLTM","rwzrltm_uat","rwzrltm_true_dev"),
-        VAR_RFZACS("rfzacs","VAR_RFZACS","rfzacs_uat","rfzacs_true_dev"),
-        VAR_RFZRPT("rfzrpt","VAR_RFZRPT","rfzrpt_uat","rfzrpt_true_dev"),
-        VAR_RFZEDM("rfzedm","VAR_RFZEDM","rfzedm_uat","rfzedm_true_dev"),
-        VAR_RFZCDR("rfzcdr","VAR_RFZCDR","rfzcdr_uat","rfzcdr_true_dev"),
-        VAR_RFZLKP("rfzlkp","VAR_RFZLKP","rfzlkp_uat","rfzlkp_true_dev"),
-        VAR_RFZNRT("rfznrt","VAR_RFZNRT","rfznrt_uat","rfznrt_true_dev"),
-        VAR_RFZNTWK("rfzntwk","VAR_RFZNTWK","rfzntwk_uat","rfzntwk_true_dev"),
-        VAR_TMPZ("tmpz","VAR_TMPZ","tmpz_uat","tmpz_true_dev"),
-        VAR_TMPOUTZ("tmpoutz","VAR_TMPOUTZ","tmpoutz_uat","tmpoutz_true_dev"),
-        VAR_FWCONFZ("fwconfz","VAR_FWCONFZ","fwconfz_uat","fwconfz_true_dev");
+        VAR_RWZBTCH("rwzbtch","VAR_RWZBTCH"),
+        VAR_RWZCDR("rwzcdr","VAR_RWZCDR"),
+        VAR_RWZMR("rwzmr","VAR_RWZMR"),
+        VAR_RWZRLTM("rwzrltm","VAR_RWZRLTM"),
+        VAR_RFZACS("rfzacs","VAR_RFZACS"),
+        VAR_RFZRPT("rfzrpt","VAR_RFZRPT"),
+        VAR_RFZEDM("rfzedm","VAR_RFZEDM"),
+        VAR_RFZCDR("rfzcdr","VAR_RFZCDR"),
+        VAR_RFZLKP("rfzlkp","VAR_RFZLKP"),
+        VAR_RFZNRT("rfznrt","VAR_RFZNRT"),
+        VAR_RFZNTWK("rfzntwk","VAR_RFZNTWK"),
+        VAR_TMPZ("tmpz","VAR_TMPZ"),
+        VAR_RWZBTDT("rwzbtdt","VAR_RWZBTDT"),
+        VAR_RFZDTA("rfzdta","VAR_RFZDTA"),
+        VAR_RFZDTB("rfzdtb","VAR_RFZDTB"),
+        VAR_TMPOUTZ("tmpoutz","VAR_TMPOUTZ"),
+        VAR_FWCONFZ("fwconfz",
+                "VAR_FWCONFZ");
 
         private String schemaName;
 
@@ -29,17 +33,22 @@ public class JobConstant {
 
         private String schemaNameTrueDev;
 
+        private String schemaNameTrueSandbox;
+
         public static final Map<String,String> schemaMap = new HashMap<>();
 
         public static final Map<String,String> schemaUatMap = new HashMap<>();
 
         public static final Map<String,String> schemaTrueDevMap = new HashMap<>();
 
-        SCHEMA_LIST(String schemaName, String schemaVariable, String schemaNameUat,String schemaNameTrueDev) {
+        public static final Map<String,String> schemaTrueSandboxMap = new HashMap<>();
+
+        SCHEMA_LIST(String schemaName, String schemaVariable) {
             this.schemaName = schemaName;
             this.schemaVariable = schemaVariable;
-            this.schemaNameUat = schemaNameUat;
-            this.schemaNameTrueDev = schemaNameTrueDev;
+            this.schemaNameUat = schemaName + "_uat";
+            this.schemaNameTrueDev = schemaName + "_true_dev";
+            this.schemaNameTrueSandbox = schemaName;
         }
 
         static {
@@ -47,6 +56,7 @@ public class JobConstant {
                 schemaMap.put(schemaList.getSchemaName(),schemaList.getSchemaVariable());
                 schemaUatMap.put(schemaList.getSchemaNameUat(), schemaList.getSchemaVariable());
                 schemaTrueDevMap.put(schemaList.getSchemaNameTrueDev(),schemaList.getSchemaVariable());
+                schemaTrueSandboxMap.put(schemaList.getSchemaNameTrueSandbox(), schemaList.getSchemaVariable());
             }
         }
 
@@ -76,6 +86,10 @@ public class JobConstant {
 
         public String getSchemaNameTrueDev() {
             return schemaNameTrueDev;
+        }
+
+        public String getSchemaNameTrueSandbox() {
+            return schemaNameTrueSandbox;
         }
     }
 

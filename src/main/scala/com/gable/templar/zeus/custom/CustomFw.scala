@@ -15,6 +15,7 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.slf4j.{Logger, LoggerFactory}
 import org.springframework.core.task.TaskExecutor
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor
+import org.springframework.web.client.HttpServerErrorException
 import org.springframework.web.context.request.{RequestContextHolder, ServletRequestAttributes}
 
 import java.sql.{DriverManager, ResultSet, ResultSetMetaData, Timestamp, Types}
@@ -38,6 +39,8 @@ trait CustomFw {
 
 
   val taskExecutor: TaskExecutor
+
+  val RETRY_COUNT = 3
 
   val schemaName = ""
 
@@ -403,20 +406,30 @@ trait CustomFw {
     }
     while (!notebookList.isEmpty) {
       Thread.sleep(timeSleep * 1000)
-      val response = RestTemplateFactoryUtil.getRestTemplar(token, true).postForObject(f"$heraUrl/private/notebook/session/parallel/check", notebookCheckParallelRequest, classOf[java.util.HashMap[String, java.util.HashMap[String, String]]])
-      response.entrySet().forEach(r => {
-        logger.info("r value = {}", r.getValue)
-        if (!r.getValue.get("status").equals("RUNNING") && !r.getValue.get("status").equals("READY")) {
-          returnResponse.append(f"note name = ${r.getKey} run ${r.getValue.get("status")} url = ${r.getValue.get("url")} result = ${r.getValue.get("message")} ${System.lineSeparator()}")
-          if (!r.getValue.get("status").equals("SUCCESS")) {
-            errorCount += 1
+      var attempt = 0
+      try {
+        val response = RestTemplateFactoryUtil.getRestTemplar(token, true).postForObject(f"$heraUrl/private/notebook/session/parallel/check", notebookCheckParallelRequest, classOf[java.util.HashMap[String, java.util.HashMap[String, String]]])
+        response.entrySet().forEach(r => {
+          logger.info("r value = {}", r.getValue)
+          if (!r.getValue.get("status").equals("RUNNING") && !r.getValue.get("status").equals("READY")) {
+            returnResponse.append(f"note name = ${r.getKey} run ${r.getValue.get("status")} url = ${r.getValue.get("url")} result = ${r.getValue.get("message")} ${System.lineSeparator()}")
+            if (!r.getValue.get("status").equals("SUCCESS")) {
+              errorCount += 1
+            }
+            if (r.getValue.get("url") != null) {
+              notebookUrl = r.getValue.get("url")
+            }
+            notebookList.remove(r.getValue.get("notebookIdRef"))
           }
-          if (r.getValue.get("url") != null) {
-            notebookUrl = r.getValue.get("url")
+        })
+      }
+      catch {
+        case e: HttpServerErrorException.BadGateway =>
+          attempt += 1
+          if(attempt >= RETRY_COUNT) {
+            throw e
           }
-          notebookList.remove(r.getValue.get("notebookIdRef"))
-        }
-      })
+      }
     }
     if (errorCount > 0) {
       returnResponse.append("There is error on some notebook")

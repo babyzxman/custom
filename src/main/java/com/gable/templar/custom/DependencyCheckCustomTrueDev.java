@@ -8,6 +8,8 @@ import com.gable.templar.zeus.SparkServer;
 import com.gable.templar.zeus.config.HeraConfig;
 import com.gable.templar.zeus.controller.model.LoginUser;
 import com.gable.templar.zeus.custom.*;
+import com.gable.templar.zeus.service.spark.SparkHiveMetaStoreService;
+import com.gable.templar.zeus.service.spark.TableManageService;
 import com.gable.templar.zeus.service.vector.ConnectionInfo;
 import org.apache.spark.sql.SparkSession;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,11 +31,17 @@ public class DependencyCheckCustomTrueDev  extends DefaultCustomService<Dependen
 
     private final GeneralService generalService = new GeneralService();
 
+    @Autowired
+    private TableManageService tableManageService;
+
+    @Autowired
+    private SparkHiveMetaStoreService sparkHiveMetaStoreService;
+
     @PostConstruct
     void init() {
         transformFw = new TransformFw("fwconfz_true_dev",
                 heraConfig.getHeraUrl(),loginUser, SparkServer.getZeusSession().session(),
-                NewThreadExecutor.threadExecutor);
+                NewThreadExecutor.threadExecutor,tableManageService,sparkHiveMetaStoreService);
         ingestFw =  new IngestFw("fwconfz_true_dev",
                 heraConfig.getHeraUrl(),loginUser, SparkServer.getZeusSession().session(),
                 NewThreadExecutor.threadExecutor);

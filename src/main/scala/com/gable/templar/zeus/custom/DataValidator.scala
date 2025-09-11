@@ -3,8 +3,13 @@ package com.gable.templar.zeus.custom
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.gable.templar.heaven.exception.InvalidArgumentException
+import com.gable.templar.zeus.SparkServer
+import com.gable.templar.zeus.controller.tablemanage.view.PartitionCondition
+import com.gable.templar.zeus.service.spark.PartitionKey
+import com.gable.templar.zeus.service.spark.TableManageService.PATH_SEPERATOR
 import com.gable.templar.zeus.service.vector.ConnectionInfo
 import io.delta.tables.DeltaTable
+import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.{DataFrame, SparkSession, functions}
 import org.apache.spark.sql.functions.{avg, col, current_timestamp, expr, lit}
 import org.apache.spark.sql.types.IntegerType
@@ -36,10 +41,75 @@ object DataValidator {
     }
   }
 
+  def convertToPartitionSql(partitionStr: String): String = {
+    val partitions = partitionStr.split("/")
+    partitions.map(p => p.split("=")(0) + "='" + p.split("=")(1) + "'").mkString(",")
+  }
+
+  def deletePartition(path: String,
+                      tableName: String,sparkSession: SparkSession,
+                      partitionKeys: List[PartitionKey],
+                      dropPartitionList: List[String]): Unit = {
+    if (null != partitionKeys && partitionKeys.nonEmpty) {
+      dropPartitionList.foreach(partToDrop => {
+        //				zeusSession.sql(s"ALTER table ${tableName} DROP IF EXISTS partition (${partToDrop.replaceAll("/", ",")})")
+        sparkSession.sql(s"ALTER table ${tableName} DROP IF EXISTS partition (${convertToPartitionSql(partToDrop)})")
+      })
+    }
+    val deletedSrcPaths = dropPartitionList.map(partToDrop => path + PATH_SEPERATOR + partToDrop)
+    deletedSrcPaths.foreach(p => {
+      SparkServer.getStoreUtil().delete(p,true)
+    })
+  }
+
+  def convertToDeleteCondition(partitionStr: String): String = {
+    val partitions = partitionStr.split("/")
+    partitions.map { p =>
+      val Array(col, value) = p.split("=")
+      s"$col='$value'"
+    }.mkString(" AND ")
+  }
+
+  def generateWhereConditionFromDeletePartition(deletePartitions: List[String]): String = {
+    if(deletePartitions.nonEmpty) {
+      val sb = new StringBuilder()
+      var count = 0
+      for (partitionToDelete <- deletePartitions) {
+        sb.append(f" (${convertToDeleteCondition(partitionToDelete)})")
+        if (count < deletePartitions.size - 1) {
+          sb.append(" OR ")
+        }
+        count += 1
+      }
+      return sb.toString()
+    }
+    ""
+  }
+
+  def generateWhereConditionFromPartitionCondition(partitionConditionList: List[PartitionCondition]): String = {
+    if(partitionConditionList.nonEmpty) {
+      val sb = new StringBuilder()
+      sb.append("WHERE ")
+      var count = 0
+      partitionConditionList.foreach(f => {
+        sb.append(f" ${f.getName} ${PartitionParsers.convertComparatorToSymbol(f.getComparator)} ${f.getValue}")
+        if (count < partitionConditionList.size - 1) {
+          sb.append(" AND ")
+        }
+        count += 1
+      })
+      sb.toString()
+    }
+    else {
+      ""
+    }
+  }
+
   def processValidationRows(spark: SparkSession,
                              validationDf: ResultSet,
                              tmpValidationNm: String,
-                             loadType: String
+                             loadType: String,
+                             whereCondition: String
                            ): Map[String, Boolean] = {
 
     var validationCountSeq = 1
@@ -91,7 +161,8 @@ object DataValidator {
 
       val isValid = validateTblOperation(
         vdJobName, vdSchemaName, tmpVdTableName, vdRuleCalc, vdRuleCalcApplyCol,
-        vdExpectValue, vdOperation, vdSqlCalc, vdSqlCalcApply, vdMarginPct,spark
+        vdExpectValue, vdOperation, vdSqlCalc, vdSqlCalcApply, vdMarginPct,spark,
+        whereCondition
       )
 
       resultDict.update(s"${vdRuleName}_rule seq : $vdValidateSeq", isValid)
@@ -127,10 +198,11 @@ object DataValidator {
     tmpzTable
   }
 
-  def validateTblOperation(jobName: String, schemaName: String, tblName: String, ruleCalc: String, ruleCalcApplyCol: List[String],
+  def validateTblOperation(jobName: String, schemaName: String,
+                           tblName: String, ruleCalc: String, ruleCalcApplyCol: List[String],
                            expectValue: Double, operation: String, sqlCalc: String = "",
                            sqlCalcApply: List[String] = List.empty, marginPct: Double = 0,
-                           spark: SparkSession): Boolean = {
+                           spark: SparkSession,whereCondition: String): Boolean = {
 
 
     val lowerBound = expectValue - (expectValue * marginPct / 100)
@@ -145,9 +217,9 @@ object DataValidator {
       }
       println("function in sql replace")
       println(formattedSqlCalc)
-      spark.sql(s"SELECT $formattedSqlCalc FROM $schemaTempTbl")
+      spark.sql(s"SELECT $formattedSqlCalc FROM $schemaTempTbl $whereCondition")
     } else {
-      spark.sql(s"SELECT ${ruleCalcApplyCol.map(c => s"`$c`").mkString(", ")} FROM $schemaTempTbl")
+      spark.sql(s"SELECT ${ruleCalcApplyCol.map(c => s"`$c`").mkString(", ")} FROM $schemaTempTbl $whereCondition")
     }
 
     println("DataFrame before aggregation:")
@@ -209,7 +281,9 @@ object DataValidator {
                          uniqueKey: String = "", updateCondition: Option[String] = None,
                          jobNm: String = "",
                          connectionInfo: ConnectionInfo,spark:SparkSession,tmpz:String,
-                         updateColumn: List[String] = List.empty): Unit = {
+                         updateColumn: List[String] = List.empty,
+                         whereCondition: String,path: String,
+                         partitionKey: List[PartitionKey],dropPartitionList: List[String]): Unit = {
     // Rewrite of `check_table_type`
     def checkTableType(targetTableNm: String): String = {
       val queryTableType = s"""
@@ -303,21 +377,11 @@ object DataValidator {
     // Main logic starts here
     println("-- start insert --")
 
-    val tmpTableNm = if (jobNm.nonEmpty) s"${jobNm}_$tmpValidationNm" else s"${tblName}_$tmpValidationNm"
+    val tmpTableNm = s"${tblName}_$tmpValidationNm"
 
     val schemaTargetTbl = TableUtils.tableSchemaCheck(tblName, schemaName)
     val schemaTempTbl = TableUtils.tableSchemaCheck(tmpTableNm, tmpz)
-    var tempTableDf: DataFrame = null
-    if(spark.catalog.tableExists(schemaTempTbl)) {
-//      spark.catalog.refreshTable(schemaTempTbl)
-      tempTableDf = spark.table(schemaTempTbl)
-    }
-    else {
-      val legacyTmpTableNm = s"${tblName}_$tmpValidationNm"
-      val legacySchemaTempTbl = TableUtils.tableSchemaCheck(legacyTmpTableNm, tmpz)
-//      spark.catalog.refreshTable(legacySchemaTempTbl)
-      tempTableDf = spark.table(legacySchemaTempTbl)
-    }
+    var tempTableDf: DataFrame = spark.sql(s"select * from ${schemaTempTbl} ${whereCondition}")
     val tableType = checkTableType(schemaTargetTbl)
     tempTableDf = withColumnIncaseOfMissingColumn(tempTableDf,schemaTargetTbl,spark,jobNm)
     insertMode.toLowerCase match {
@@ -332,7 +396,11 @@ object DataValidator {
         spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
         val writer = tempTableDf.write.mode("overwrite")
         if (tableType.toLowerCase == "delta") writer.format("delta").insertInto(schemaTargetTbl)
-        else writer.insertInto(schemaTargetTbl)
+        else {
+          val path = spark.sessionState.catalog.getTableMetadata(TableIdentifier(tblName,Some(schemaName))).location.toString
+          deletePartition(path,schemaTargetTbl,spark,partitionKey,dropPartitionList)
+          writer.insertInto(schemaTargetTbl)
+        }
 
       case "append" =>
         val writer = tempTableDf.write.mode("append")

@@ -3,7 +3,7 @@ package com.gable.templar.zeus.custom
 import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import com.gable.templar.constant.JobConstant
 import com.gable.templar.constant.JobConstant.{CATCHUP_TYPE, LOAD_TYPE}
-import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse}
+import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse, RunNotebookParallelResult}
 import com.gable.templar.exception.{DropDuplicatesJobError, DropSuccessJobError, RunNotebookParallelException}
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.zeus.controller.model.LoginUser
@@ -594,9 +594,17 @@ class IngestFw(override val schemaName: String,
                 updateJobStartTimeOfAuditLogByJobNameAndRoundTimeAndDagRun(
                   jobName,jobStartTime,roundTime,runId,
                   "tbl_ingest_audit_logs",postgresConnectionInfo,refDateIctrlDt)
-                val runNotebookParallelResult =
-                  doRunNotebookParallel(param, "2M4GWV7SQ", dependencyCheckModel,
-                    username, runId,httpServletRequest)
+                var runNotebookParallelResult: RunNotebookParallelResult = null
+                if(dependencyCheckModel.getWorkspaceName != null) {
+                  runNotebookParallelResult =
+                    doRunNotebookParallel(param, f"2M4GWV7SQ~${dependencyCheckModel.getWorkspaceName}", dependencyCheckModel,
+                      username, runId, httpServletRequest)
+                }
+                else {
+                  runNotebookParallelResult =
+                    doRunNotebookParallel(param, "2M4GWV7SQ", dependencyCheckModel,
+                      username, runId, httpServletRequest)
+                }
                 var status = ""
                 if (runNotebookParallelResult.getErrorMsg != null) {
                   status = "FAILED"
