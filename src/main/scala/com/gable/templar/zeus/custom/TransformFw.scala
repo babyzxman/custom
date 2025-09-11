@@ -139,10 +139,6 @@ class TransformFw(override val schemaName: String,
       calOverLap(currentLocalDateRun,overlap,frequency).format(DateTimeFormatter.ofPattern(ictrlDtTgtfmt))))
     param.put("end_ictrl_dt_w_overlap", objectMapper.valueToTree(refDateIctrlDt))
     param.put("round_time",objectMapper.valueToTree(roundTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS"))))
-    if(controlJobDf.getAs[String]("ictrl_dt_type") != null)
-      param.put("ictrl_dt_type", objectMapper.valueToTree(controlJobDf.getAs[String]("ictrl_dt_type")))
-    else
-      param.put("ictrl_dt_type", objectMapper.valueToTree("system"))
     param.put("frequency_job", objectMapper.valueToTree(frequency))
     if(dependencyCheckModel.getFixedDate != null)
       param.put("manual_ref_date", objectMapper.valueToTree("False"))
