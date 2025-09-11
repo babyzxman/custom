@@ -272,9 +272,19 @@ class TransformFw(override val schemaName: String,
         var currentLocalDateRun: LocalDateTime = null
         var catchUpType = controlJobDf.getAs[String]("catchup_type")
         var ictrlDtTgtFmt = controlJobDf.getAs[String]("ictrl_dt_tgtfmt")
-        val schemaNameFromTbl =  controlJobDf.getAs[String]("schema_nm")
-        val tableName = controlJobDf.getAs[String]("table_nm")
-        val loadType = controlJobDf.getAs[String]("load_type")
+        var schemaNameFromTbl: String = null
+        var tableName: String = null
+        var loadType: String = null
+        if(JOB_TYPE.equals(JobConstant.JOB_TYPE.TRANSFORM)) {
+          schemaNameFromTbl = controlJobDf.getAs[String]("schema_nm")
+          tableName = controlJobDf.getAs[String]("table_nm")
+          loadType = controlJobDf.getAs[String]("load_type")
+        }
+        else {
+          schemaNameFromTbl = controlJobDf.getAs[String]("ob_src_schema")
+          tableName = controlJobDf.getAs[String]("ob_src_table")
+          loadType = controlJobDf.getAs[String]("ob_write_mode")
+        }
         var taskGroupName = controlJobDf.getAs[String]("tasksgroup_nm")
         val overlapTime = controlJobDf.getAs[Any]("overlap")
         if(taskGroupName == null ) {
