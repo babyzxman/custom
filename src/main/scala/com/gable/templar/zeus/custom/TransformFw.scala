@@ -319,7 +319,7 @@ class TransformFw(override val schemaName: String,
             }
           }
         }
-        if(currentDateRun == null || loadType.equals(LOAD_TYPE.FULL_LOAD.getValue)) {
+        if(currentDateRun == null || LOAD_TYPE.FULL_LOAD.getValue.equals(loadType)) {
           currentLocalDateRun = masterRefDate
           currentDateRun = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
         }
