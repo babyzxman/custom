@@ -582,7 +582,10 @@ class IngestFw(override val schemaName: String,
                 param.put("frequency_job", objectMapper.valueToTree(frequency))
                 param.put("load_type", objectMapper.valueToTree(controlJobDf.getAs[String]("load_type")))
                 param.put("table_conf", objectMapper.valueToTree(tblConfName))
-                param.put("manual_ref_date", objectMapper.valueToTree("False"))
+                if(dependencyCheckModel.getFixedDate != null)
+                  param.put("manual_ref_date", objectMapper.valueToTree("False"))
+                else
+                  param.put("manual_ref_date",objectMapper.valueToTree("True"))
                 param.put("last_success_ictrl_dt",objectMapper.valueToTree(currentDateRun))
                 param.put("dag_run_id", objectMapper.valueToTree(runId))
                 if (dependencyCheckModel.getTaskGroupName != null)
