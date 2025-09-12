@@ -48,14 +48,11 @@ object DataValidator {
 
   def deletePartition(path: String,
                       tableName: String,sparkSession: SparkSession,
-                      partitionKeys: List[PartitionKey],
                       dropPartitionList: List[String]): Unit = {
-    if (null != partitionKeys && partitionKeys.nonEmpty) {
-      dropPartitionList.foreach(partToDrop => {
-        //				zeusSession.sql(s"ALTER table ${tableName} DROP IF EXISTS partition (${partToDrop.replaceAll("/", ",")})")
-        sparkSession.sql(s"ALTER table ${tableName} DROP IF EXISTS partition (${convertToPartitionSql(partToDrop)})")
-      })
-    }
+    dropPartitionList.foreach(partToDrop => {
+      //				zeusSession.sql(s"ALTER table ${tableName} DROP IF EXISTS partition (${partToDrop.replaceAll("/", ",")})")
+      sparkSession.sql(s"ALTER table ${tableName} DROP IF EXISTS partition (${convertToPartitionSql(partToDrop)})")
+    })
     val deletedSrcPaths = dropPartitionList.map(partToDrop => path + PATH_SEPERATOR + partToDrop)
     deletedSrcPaths.foreach(p => {
       SparkServer.getStoreUtil().delete(p,true)
@@ -284,7 +281,7 @@ object DataValidator {
                          connectionInfo: ConnectionInfo,spark:SparkSession,tmpz:String,
                          updateColumn: List[String] = List.empty,
                          whereCondition: String,path: String,
-                         partitionKey: List[PartitionKey],dropPartitionList: List[String]): Unit = {
+                         dropPartitionList: List[String]): Unit = {
     // Rewrite of `check_table_type`
     def checkTableType(targetTableNm: String): String = {
       val queryTableType = s"""
@@ -396,10 +393,13 @@ object DataValidator {
         println("Overwrite with partition")
         spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
         val writer = tempTableDf.write.mode("overwrite")
-        if (tableType.toLowerCase == "delta") writer.format("delta").insertInto(schemaTargetTbl)
+        if (tableType.toLowerCase == "delta") {
+          spark.sql(f"delete from ${schemaTargetTbl} where ${generateWhereConditionFromDeletePartition(dropPartitionList)}")
+          writer.format("delta").insertInto(schemaTargetTbl)
+        }
         else {
           val path = spark.sessionState.catalog.getTableMetadata(TableIdentifier(tblName,Some(schemaName))).location.toString
-          deletePartition(path,schemaTargetTbl,spark,partitionKey,dropPartitionList)
+          deletePartition(path,schemaTargetTbl,spark,dropPartitionList)
           writer.insertInto(schemaTargetTbl)
         }
 

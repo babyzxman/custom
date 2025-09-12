@@ -7,6 +7,8 @@ import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse, Run
 import com.gable.templar.exception.RunNotebookParallelException
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.heaven.util.RestTemplateFactoryUtil
+
+import scala.jdk.CollectionConverters._
 import com.gable.templar.zeus.SparkServer
 import com.gable.templar.zeus.controller.model.LoginUser
 import com.gable.templar.zeus.controller.tablemanage.view.PartitionCondition
@@ -15,11 +17,16 @@ import com.gable.templar.zeus.service.spark.{PartitionKey, SparkHiveMetaStoreSer
 import com.gable.templar.zeus.service.vector.ConnectionInfo
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.catalyst.TableIdentifier
+import org.apache.spark.sql.delta.DeltaLog
+import io.delta.tables.DeltaTable
+import org.apache.spark.sql.catalyst.TableIdentifier
+import org.apache.spark.sql.delta.actions.AddFile
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.slf4j.LoggerFactory
 import org.springframework.core.task.TaskExecutor
 import org.springframework.web.client.HttpServerErrorException.InternalServerError
 
+import java.nio.file.Files
 import java.sql.{ResultSet, Timestamp}
 import java.text.SimpleDateFormat
 import java.time.{Duration, LocalDateTime, LocalTime}
@@ -252,6 +259,59 @@ class TransformFw(override val schemaName: String,
       SparkServer.getStoreUtil().delete(p,true)
     })
   }
+
+  def getTableIdentifierFromTableName(tableName: String): TableIdentifier = {
+    if (tableName.contains(".")) {
+      val tableNameSplit = tableName.split("\\.")
+      new TableIdentifier(tableNameSplit(1), Some(tableNameSplit(0)))
+    }
+    else {
+      new TableIdentifier(tableName)
+    }
+  }
+
+
+
+  def generateDeltaLogWherePartitionCondition(tableName: String,sparkSession: SparkSession,
+                                              partitionConditions: List[PartitionCondition]): List[String] = {
+    val snap = DeltaLog.forTable(sparkSession,getTableIdentifierFromTableName(tableName)).snapshot
+    var deletePartitionList: List[String] = List.empty
+    var it:Iterator[AddFile] = null
+    if(partitionConditions.isEmpty) {
+      it = snap.allFiles
+        .toLocalIterator()    // Iterator[Row], not AddFile
+    }
+    else {
+      val whereCondition: StringBuilder = StringBuilder.newBuilder
+      var count = 0
+      for(partitionCondition <- partitionConditions) {
+        whereCondition.append(f"partitionValues['${partitionCondition.getName}'] ${
+          PartitionParsers.convertComparatorToSymbol(partitionCondition.getComparator)} " +
+          f"'${partitionCondition.getValue}'")
+        if(count < partitionConditions.size - 1) {
+          whereCondition.append(" AND ")
+        }
+        count += 1
+      }
+      it = snap.allFiles.where(whereCondition.toString()).toLocalIterator()
+    }
+    while(it.hasNext) {
+      val partitionValue = it.next().partitionValues
+      val fullPartitionPath: StringBuilder = new StringBuilder()
+      var count = 0
+      partitionValue.foreach(m => {
+        fullPartitionPath.append(f"${m._1}=${m._2}")
+        if(count < partitionValue.size -1) {
+          fullPartitionPath.append(PATH_SEPERATOR)
+        }
+        count += 1
+      })
+      deletePartitionList += fullPartitionPath.toString()
+    }
+    deletePartitionList
+    // Extract partition maps from rows
+  }
+
 
   override def doRunFramework(dependencyCheckModel: DependencyCheckModel,
                               JOB_TYPE: JOB_TYPE, jobName: String,
@@ -498,13 +558,18 @@ class TransformFw(override val schemaName: String,
                   "tbl_trans_audit_detail_next_logs")
                 startDetailTime = LocalDateTime.now()
                 if(isTmpTableExists) {
-                  val partitionKeys = sparkHiveMetaStoreService.getPartitionKeys(f"$tmpzSchema.${tableName}_tmp_validation")
+                  var partitionKeys: List[PartitionKey] = List.empty
                   val isDeltaTable = DeltaTable.isDeltaTable(sparkSession,f"$tmpzSchema.${tableName}_tmp_validation")
-                  if(isDeltaTable) {
-
+                  val dropPartitionList = if(isDeltaTable) {
+                    generateDeltaLogWherePartitionCondition(
+                      f"$tmpzSchema.${tableName}_tmp_validation",
+                      sparkSession,partitionConditionList)
                   }
-                  val dropPartitionList = getTablePartitionDropList(partitionConditionList,
-                    f"$tmpzSchema.${tableName}_tmp_validation",partitionKeys)
+                  else {
+                    partitionKeys = sparkHiveMetaStoreService.getPartitionKeys(f"$tmpzSchema.${tableName}_tmp_validation")
+                    getTablePartitionDropList(partitionConditionList,
+                      f"$tmpzSchema.${tableName}_tmp_validation",partitionKeys)
+                  }
                   processCount = sparkSession.sql(f"select * from $tmpzSchema.${tableName}_tmp_validation $whereCondition").count()
                   val sql = f"select job_nm,schema_nm,tbl_nm,rule_nm,rule_calc," +
                     f"rule_calc_apply_col,expect_value,operation,sql_calc,sql_calc_apply," +
@@ -528,7 +593,10 @@ class TransformFw(override val schemaName: String,
                       getAs[String]("unique_key"),
                     Some(controlJobDf.getAs[String]("update_condition")),
                     jobName, connectionInfo, sparkSession, tmpzSchema,updateCondition,
-                    whereCondition,location.toString,partitionKeys,dropPartitionList)
+                    whereCondition,location.toString,dropPartitionList)
+                  if(isDeltaTable) {
+                    sparkSession.sql(s"delete from ${tmpzSchema}.${tableName}_tmp_validation ${DataValidator.generateWhereConditionFromPartitionCondition(partitionConditionList)}")
+                  }
                   deletePartition(location.toString,partitionConditionList,
                     f"$tmpzSchema.${tableName}_tmp_validation",sparkSession,
                     partitionKeys,dropPartitionList)
@@ -676,16 +744,6 @@ class TransformFw(override val schemaName: String,
     finally{
       dfResultLog.close()
     }
-  }
-
-  private def initBuilder(master:String,appName:String): SparkSession ={
-    logger.info("Spark initial builder...")
-    val sparkBuilder = SparkSession.builder()
-      .master(master)
-      .appName(appName)
-      .enableHiveSupport()
-      .config(SparkServer.getConfigs)
-    sparkBuilder.getOrCreate()
   }
 
 
