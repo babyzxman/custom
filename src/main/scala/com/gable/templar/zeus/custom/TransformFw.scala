@@ -207,6 +207,7 @@ class TransformFw(override val schemaName: String,
   def getTablePartitionDropList(partitionConds: List[PartitionCondition],
                                 tableName: String,
                                 partitionKeys: List[PartitionKey]): List[String] = {
+
     val partitionKeysName = partitionKeys.map(_.name)
     var ptConditionsGroup = Map[String, List[PartitionCondition]]()
     if (null != partitionConds && partitionConds.nonEmpty) {
