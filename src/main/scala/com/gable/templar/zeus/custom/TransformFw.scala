@@ -13,6 +13,7 @@ import com.gable.templar.zeus.controller.tablemanage.view.PartitionCondition
 import com.gable.templar.zeus.service.spark.TableManageService.PATH_SEPERATOR
 import com.gable.templar.zeus.service.spark.{PartitionKey, SparkHiveMetaStoreService, TableManageService}
 import com.gable.templar.zeus.service.vector.ConnectionInfo
+import io.delta.tables.DeltaTable
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.slf4j.LoggerFactory
@@ -498,6 +499,10 @@ class TransformFw(override val schemaName: String,
                 startDetailTime = LocalDateTime.now()
                 if(isTmpTableExists) {
                   val partitionKeys = sparkHiveMetaStoreService.getPartitionKeys(f"$tmpzSchema.${tableName}_tmp_validation")
+                  val isDeltaTable = DeltaTable.isDeltaTable(sparkSession,f"$tmpzSchema.${tableName}_tmp_validation")
+                  if(isDeltaTable) {
+
+                  }
                   val dropPartitionList = getTablePartitionDropList(partitionConditionList,
                     f"$tmpzSchema.${tableName}_tmp_validation",partitionKeys)
                   processCount = sparkSession.sql(f"select * from $tmpzSchema.${tableName}_tmp_validation $whereCondition").count()
