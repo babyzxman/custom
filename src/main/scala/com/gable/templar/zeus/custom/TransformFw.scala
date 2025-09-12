@@ -422,7 +422,7 @@ class TransformFw(override val schemaName: String,
                   runParallelResult.setSuccessList(successList)
                   for (countRemove <- 0 to backlogTime) {
                     val localDateRun = minusDateByFrequency(ictrlDtRun, frequency, backlogTime - countRemove)
-                    val refIctrlDt = ictrlDtRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
+                    val refIctrlDt = localDateRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
                     val runNotebookParallelResult = doRunNotebookParallelInMain(
                       jobName, taskGroupName, controlJobDf, runId, roundTime, masterRefDate,
                       localDateRun, refIctrlDt, schemaMap, connectionInfo, JOB_TYPE,

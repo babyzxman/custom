@@ -17,4 +17,8 @@ public class ExecuteResponse {
     public void setJobName(String jobName) {
         this.jobName = jobName;
     }
+
+    public String getJobName() {
+        return jobName;
+    }
 }

@@ -29,21 +29,25 @@ class GeneralService {
                      transformFw: CustomFw,ingestFw: IngestFw,
                      schemaName: String): ExecuteResponseWrap = {
     val sparkSession = SparkServer.getZeusSession.session
-    var jobType: JobConstant.JOB_TYPE = null
+    var jobType: List[JOB_TYPE] = List.empty
     val queryMasterSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = 'fw_postgre'"
     val postgresConnectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql, salt, ultKey)
     val executeResponseWrap = new ExecuteResponseWrap
     if(params.getJobNames == null || params.getJobNames.isEmpty) {
-      if (params.getTaskGroupName != null) jobType = checkJobTypeFromTaskGroup(params.getTaskGroupName, sparkSession, schemaName)
-      else jobType = checkJobTypeFromJobName(params.getJobName, schemaName, postgresConnectionInfo)
-      val customFw = getCustomFwClassByJobType(jobType,transformFw,ingestFw)
+      if (params.getTaskGroupName != null) {
+        jobType = checkJobTypeFromTaskGroup(params.getTaskGroupName, sparkSession, schemaName)
+      }
+      else {
+        jobType = jobType :+ checkJobTypeFromJobName(params.getJobName, schemaName, postgresConnectionInfo)
+      }
+      val customFw = getCustomFwClassByJobType(jobType.head,transformFw,ingestFw)
       executeResponseWrap.setExecuteResponseList(customFw.doRunTaskGroup(params, jobType))
     }
     else {
       val executeResponseList: java.util.ArrayList[ExecuteResponse] = new util.ArrayList[ExecuteResponse]()
       params.getJobNames.forEach(j => {
-        jobType = checkJobTypeFromJobName(j, schemaName, postgresConnectionInfo)
-        val customFw = getCustomFwClassByJobType(jobType,transformFw,ingestFw)
+        jobType = jobType :+ checkJobTypeFromJobName(j, schemaName, postgresConnectionInfo)
+        val customFw = getCustomFwClassByJobType(jobType.head,transformFw,ingestFw)
         executeResponseList.addAll(customFw.doRunTaskGroup(params, jobType))
       })
       executeResponseWrap.setExecuteResponseList(executeResponseList)
@@ -51,27 +55,31 @@ class GeneralService {
     executeResponseWrap
   }
 
-  def checkJobTypeFromTaskGroup(taskGroupName: String,sparkSession: SparkSession, schemaName: String): JOB_TYPE = {
+  def checkJobTypeFromTaskGroup(taskGroupName: String,sparkSession: SparkSession, schemaName: String): List[JOB_TYPE] = {
+    var jobTypeList: List[JOB_TYPE] = List.empty
     if(!sparkSession.sql(f"select * from ${schemaName}.tbl_job_trans where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
-      JOB_TYPE.TRANSFORM
+      jobTypeList :+ JOB_TYPE.TRANSFORM
     }
     else if(!sparkSession.sql(f"select * from ${schemaName}.tbl_job_outbound where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
-      JOB_TYPE.OUTBOUND
-    }
-    else if(!sparkSession.sql(f"select * from ${schemaName}.${JobConstant.tableNmApiIngestion} where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
-      JOB_TYPE.INGEST_API
-    }
-    else if(!sparkSession.sql(f"select * from ${schemaName}.${JobConstant.tableNmDbIngestion} where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
-      JOB_TYPE.INGEST_DB
-    }
-    else if(!sparkSession.sql(f"select * from ${schemaName}.${JobConstant.tableNmFileIngestion} where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
-      JOB_TYPE.FILE
-    }
-    else if (!sparkSession.sql(f"select * from $schemaName.${JobConstant.tableNmKafkaIngestion} where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
-      JOB_TYPE.KAFKA
+      jobTypeList :+ JOB_TYPE.OUTBOUND
     }
     else {
-      throw new InvalidArgumentException("The config job name is not in TBL_CONFIG")
+      if (!sparkSession.sql(f"select * from ${schemaName}.${JobConstant.tableNmApiIngestion} where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
+        jobTypeList = jobTypeList :+ JOB_TYPE.INGEST_API
+      }
+      if (!sparkSession.sql(f"select * from ${schemaName}.${JobConstant.tableNmDbIngestion} where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
+        jobTypeList = jobTypeList :+ JOB_TYPE.INGEST_DB
+      }
+      if (!sparkSession.sql(f"select * from ${schemaName}.${JobConstant.tableNmFileIngestion} where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
+        jobTypeList = jobTypeList :+ JOB_TYPE.FILE
+      }
+      if (!sparkSession.sql(f"select * from $schemaName.${JobConstant.tableNmKafkaIngestion} where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
+        jobTypeList = jobTypeList :+ JOB_TYPE.KAFKA
+      }
+      if (jobTypeList.isEmpty) {
+        throw new InvalidArgumentException("The config job name is not in TBL_CONFIG")
+      }
+      jobTypeList
     }
   }
 

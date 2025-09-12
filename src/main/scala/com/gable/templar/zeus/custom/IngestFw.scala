@@ -165,11 +165,26 @@ class IngestFw(override val schemaName: String,
 //    }
   }
 
+  def checkFrequencyAndTgtFmt(frequency: String, ictrlDtTgtFmt: String): Boolean = {
+    val correctFormat = frequency.toLowerCase match {
+      case "daily" => {
+        "yyyyMMdd"
+      }
+      case "monthly" => {
+        "yyyyMM"
+      }
+      case "hourly" => {
+        "yyyyMMddHH"
+      }
+    }
+    correctFormat == ictrlDtTgtFmt
+  }
+
   def checkRunningIctrlDtIngest(jobNmUpdate: String, tasksgroupNmUpdate: String,
                                  ictrlDtUpdate: String, roundTime: LocalDateTime, jobStartTimeUpdate: LocalDateTime,
                                  startIctrlDtStrUpdate: String, endIctrlDtStrUpdate: String, processJobType: String,
                                  cdrFlag: Boolean = false, dagRunId: String, appIdUpdate: String,
-                                 connectionInfo: ConnectionInfo): Unit = {
+                                 frequency: String, connectionInfo: ConnectionInfo, ictrlDtTgtFmt: String): Unit = {
 
 
     println(s"Running time to check log: ${LocalDateTime.now()}")
@@ -298,7 +313,7 @@ class IngestFw(override val schemaName: String,
     }
 
     // More Codition Check SUCCEED Log
-    if (processJobType == "ongoing" && !cdrFlag) {
+    if (processJobType == "ongoing" && !cdrFlag && checkFrequencyAndTgtFmt(frequency,ictrlDtTgtFmt)) {
       logger.info("test ongoing job logs")
       val queryIngLogSuccess =
         s"""
@@ -428,16 +443,17 @@ class IngestFw(override val schemaName: String,
             masterRefDate = minusDateByFrequency(
               truncateToFormat(dependencyCheckModel.get_bldEndDate().
                 toLocalDateTime,dateFormatIctrlDtForTb),frequency,backdate)
-            origRefDate =  truncateToFormat(dependencyCheckModel.get_bldEndDate().
-              toLocalDateTime,dateFormatIctrlDtForTb)
+            origRefDate =  dependencyCheckModel.get_bldEndDate().toLocalDateTime
           }
           else {
-            masterRefDate = parseToLocalDateTime(dependencyCheckModel.getFixedDate, dateFormatIctrlDtForTb).get
-            origRefDate = dependencyCheckModel.get_bldStartDate().toLocalDateTime
+            val tempDateTime = parseToLocalDateTime(dependencyCheckModel.getFixedDate, dateFormatIctrlDtForTb).get
+            masterRefDate = truncateToFormat(tempDateTime,dateFormatIctrlDtForTb)
+            origRefDate = tempDateTime
             processJobType = "manual"
           }
           if (currentDateRun == null || loadType.equals(LOAD_TYPE.FULL_LOAD.getValue)) {
             currentLocalDateRun = masterRefDate
+            logger.info("current local date run init = {}",currentDateRun)
             currentDateRun = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
           }
           else {
@@ -493,6 +509,8 @@ class IngestFw(override val schemaName: String,
               }
               ictrlDtRun = masterRefDate
               if (catchUpType.equalsIgnoreCase(CATCHUP_TYPE.SEQUENCE.getValue)) {
+                logger.info("current local date run = {}",currentLocalDateRun)
+                logger.info("master ref date = {}",masterRefDate)
                 if (masterRefDate.isAfter(currentLocalDateRun) || masterRefDate.isEqual(currentLocalDateRun)) {
                   ictrlDtRun = currentLocalDateRun
                 }
@@ -522,7 +540,8 @@ class IngestFw(override val schemaName: String,
                 checkRunningIctrlDtIngest(jobName,
                   taskGroupName, refDateIctrlDt, roundTime, runTime, startDateWithOverlapIctrlDt,
                   refDateIctrlDt, processJobType, isCdr, runId,
-                  sparkSession.sparkContext.applicationId, postgresConnectionInfo)
+                  sparkSession.sparkContext.applicationId, frequency,
+                  postgresConnectionInfo,dateFormatIctrlDtForTb)
                 var startDetailTime: LocalDateTime = LocalDateTime.now()
                 val queryMasterSourceSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = 'core_dwh_TEDWHDPAPPB'"
                 val connectionInfo = ConnectionService.getMasterConfigLog(queryMasterSourceSql, salt, ultKey)

@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.gable.templar.constant.JobConstant
 import com.gable.templar.constant.JobConstant.{JOB_TYPE, importParameter, initialTitle, manualTitle}
-import com.gable.templar.custom.view.{AirflowModelView, DependencyCheckModel, ExecuteResponse, NotebookCheckParallelRequest, NotebookIdAddParameterRequest, NotebookRunParallelRequest, NotebookRunParallelResponse, RunNotebookParallelResult}
+import com.gable.templar.custom.view.{AirflowModelView, DependencyCheckModel, ExecuteResponse, NotebookCheckParallelRequest, NotebookIdAddParameterRequest, NotebookRunParallelRequest, NotebookRunParallelResponse, RunNotebookParallelResult, SequenceJobInformation}
 import com.gable.templar.exception.{DropDuplicatesJobError, DropSuccessJobError}
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.heaven.util.{HTTPServletRequestUtil, RestTemplateFactoryUtil}
@@ -121,40 +121,53 @@ trait CustomFw {
     }
   }
 
-  def getSequenceAndJob(rows: Array[Row]): mutable.TreeMap[Int,Array[Row]] = {
-    val jobMap: mutable.TreeMap[Int,Array[Row]] = mutable.TreeMap.empty
+  def getSequenceAndJob(rows: Array[Row],tblConf: String,jobType: JOB_TYPE): mutable.TreeMap[Int,SequenceJobInformation] = {
+    val jobMap: mutable.TreeMap[Int,SequenceJobInformation] = mutable.TreeMap.empty
     rows.foreach(r => {
-      var resultRow = jobMap.get(r.getAs[Int]("sequence")).orNull
-      if(resultRow == null) {
-        resultRow = Array.empty
+      var resultSeqInformation = jobMap.get(r.getAs[Int]("sequence")).orNull
+      var resultRow: Array[Row] = Array.empty
+      if(resultSeqInformation == null) {
+        val resultSeqInformationTemp = new SequenceJobInformation
+        resultSeqInformationTemp.setData(resultRow)
+        resultSeqInformationTemp.setJobType(jobType)
+        resultSeqInformationTemp.setTblConf(tblConf)
+        resultSeqInformation = resultSeqInformationTemp
+      }
+      else {
+        resultRow = resultSeqInformation.getData
       }
       resultRow = resultRow :+ r
-      jobMap.put(r.getAs[Int]("sequence"),resultRow)
+      resultSeqInformation.setData(resultRow)
+      jobMap.put(r.getAs[Int]("sequence"),resultSeqInformation)
     })
     jobMap
   }
 
-  def getTblConfNameByJobType(jobType: JOB_TYPE): String = {
-    jobType match {
-      case JOB_TYPE.FILE => {
-        JobConstant.tableNmFileIngestion
-      }
-      case JOB_TYPE.KAFKA => {
-        JobConstant.tableNmKafkaIngestion
-      }
-      case JOB_TYPE.TRANSFORM => {
-        JobConstant.tableNmTrans
-      }
-      case JOB_TYPE.INGEST_DB => {
-        JobConstant.tableNmDbIngestion
-      }
-      case JOB_TYPE.INGEST_API => {
-        JobConstant.tableNmApiIngestion
-      }
-      case JOB_TYPE.OUTBOUND => {
-        JobConstant.tableNmOutBound
+  def getTblConfNameByJobType(jobTypeList: List[JOB_TYPE]): List[String] = {
+    var tblConfList: List[String] = List.empty
+    for(jobType <- jobTypeList) {
+      jobType match {
+        case JOB_TYPE.FILE => {
+         tblConfList = tblConfList :+ JobConstant.tableNmFileIngestion
+        }
+        case JOB_TYPE.KAFKA => {
+          tblConfList = tblConfList :+ JobConstant.tableNmKafkaIngestion
+        }
+        case JOB_TYPE.TRANSFORM => {
+          tblConfList = tblConfList :+ JobConstant.tableNmTrans
+        }
+        case JOB_TYPE.INGEST_DB => {
+          tblConfList = tblConfList :+ JobConstant.tableNmDbIngestion
+        }
+        case JOB_TYPE.INGEST_API => {
+          tblConfList = tblConfList :+ JobConstant.tableNmApiIngestion
+        }
+        case JOB_TYPE.OUTBOUND => {
+          tblConfList = tblConfList :+ JobConstant.tableNmOutBound
+        }
       }
     }
+    tblConfList
   }
 
   def rsToDataFrame(rs: ResultSet, spark: SparkSession): Array[Row] = {
@@ -219,7 +232,7 @@ trait CustomFw {
   }
 
 
-  def doRunTaskGroup(dependencyCheckModel: DependencyCheckModel, jobType: JOB_TYPE): util.ArrayList[ExecuteResponse] = {
+  def doRunTaskGroup(dependencyCheckModel: DependencyCheckModel, jobType: List[JOB_TYPE]): util.ArrayList[ExecuteResponse] = {
     taskExecutor match {
       case tpe: ThreadPoolTaskExecutor =>
         val poolSize = tpe.getPoolSize // Current threads in the pool
@@ -243,67 +256,74 @@ trait CustomFw {
           get_workflowId(),classOf[AirflowModelView])
       val taskStartTime = LocalDateTime.now()
       val executeResult = new util.ArrayList[ExecuteResponse]()
-      val query =
-        f"""select *
-           |from ${schemaName}.$tblConfName
-           |where lower(tasksgroup_nm) = lower('${dependencyCheckModel.getTaskGroupName}') and lower(active_flag) = lower('Y')""".stripMargin
-      insertTaskgroupLogs(dependencyCheckModel.getTaskGroupName,taskStartTime,roundTime,
-        dependencyCheckModel.getModuleNotebookName,postgresConnectionInfo,airflowModelView.getDagName)
-      val taskGroupConnection = ConnectionService.postgresqlQueryDirectly(
-        postgresConnectionInfo.getIp,postgresConnectionInfo.getPort,
-        postgresConnectionInfo.getDbName,postgresConnectionInfo.getUserNm,
-        postgresConnectionInfo.getPassword,query)
+      var count = 0
+      var mergedTreeMap: mutable.TreeMap[Int, SequenceJobInformation] = mutable.TreeMap.empty[Int,SequenceJobInformation]
+      for(tblConf <- tblConfName) {
+        logger.info("tbl conf = {}",tblConf)
+        val query =
+          f"""select *
+             |from ${schemaName}.$tblConf
+             |where lower(tasksgroup_nm) = lower('${dependencyCheckModel.getTaskGroupName}') and lower(active_flag) = lower('Y')""".stripMargin
+        insertTaskgroupLogs(dependencyCheckModel.getTaskGroupName,taskStartTime,roundTime,
+          dependencyCheckModel.getModuleNotebookName,postgresConnectionInfo,airflowModelView.getDagName)
+        val taskGroupConnection = ConnectionService.postgresqlQueryDirectly(
+          postgresConnectionInfo.getIp,postgresConnectionInfo.getPort,
+          postgresConnectionInfo.getDbName,postgresConnectionInfo.getUserNm,
+          postgresConnectionInfo.getPassword,query)
+        try {
+          val taskGroupDf = rsToDataFrame(taskGroupConnection.rs, sparkSession)
+          mergedTreeMap = mergedTreeMap ++ getSequenceAndJob(taskGroupDf,tblConf,jobType(count))
+          count += 1
+        }
+        finally {
+          taskGroupConnection.close()
+        }
+      }
       val limiter = new Semaphore(CONCURRENT_SCHEDULE, true)
       val errorMsg = new StringBuilder
       var isFailed = false
-      try {
-        val taskGroupDf = rsToDataFrame(taskGroupConnection.rs, sparkSession)
-        val jobMap = getSequenceAndJob(taskGroupDf)
-        jobMap.foreach(j => {
-          val completableFutureList = ArrayBuffer[CompletableFuture[ExecuteResponse]]()
-          j._2.foreach(r => {
-            logger.info("job list = {}",r.getAs[String]("job_nm"))
-            val executeResponse = new ExecuteResponse
-            executeResponse.setJobName(r.getAs[String]("job_nm"))
-            limiter.acquire()
-            val cf = doRunFramework(dependencyCheckModel,
-              jobType, r.getAs[String]("job_nm"), r, tblConfName, httpServletRequest, loginUser.getUsername,roundTime)
-            cf.whenComplete((_, _) => limiter.release())
-              .whenComplete((res, err) => {
-                if (err != null) {
-                  isFailed = true
-                  errorMsg.append(err.getMessage)
-                }
-              })
-            completableFutureList += cf
-            executeResult.add(executeResponse)
-          })
-          val allOf = CompletableFuture.allOf(completableFutureList: _*)
-          try {
-            allOf.join()
-          }
-          catch {
-            case exception: Exception => {
-              logger.error(exception.getMessage,exception)
-              isFailed = true
-            }
-          }
+      logger.info("merged tree map = {}",mergedTreeMap)
+      mergedTreeMap.foreach(j => {
+        val completableFutureList = ArrayBuffer[CompletableFuture[ExecuteResponse]]()
+        j._2.getData.foreach(r => {
+          logger.info("job list = {}", r.getAs[String]("job_nm"))
+          val executeResponse = new ExecuteResponse
+          executeResponse.setJobName(r.getAs[String]("job_nm"))
+          limiter.acquire()
+          val cf = doRunFramework(dependencyCheckModel,
+            j._2.getJobType, r.getAs[String]("job_nm"), r, j._2.getTblConf, httpServletRequest, loginUser.getUsername, roundTime)
+          cf.whenComplete((_, _) => limiter.release())
+            .whenComplete((res, err) => {
+              if (err != null) {
+                isFailed = true
+                errorMsg.append(err.getMessage)
+              }
+            })
+          completableFutureList += cf
+          executeResult.add(executeResponse)
         })
-        if(isFailed) {
-          updateTaskgroupLogs(dependencyCheckModel.getTaskGroupName,taskStartTime,roundTime,"FAILED",postgresConnectionInfo)
-          throw new Exception(errorMsg.toString())
+        val allOf = CompletableFuture.allOf(completableFutureList: _*)
+        try {
+          allOf.join()
         }
-        updateTaskgroupLogs(dependencyCheckModel.getTaskGroupName,taskStartTime,roundTime,"SUCCESS",postgresConnectionInfo)
+        catch {
+          case exception: Exception => {
+            logger.error(exception.getMessage, exception)
+            isFailed = true
+          }
+        }
+      })
+      if (isFailed) {
+        updateTaskgroupLogs(dependencyCheckModel.getTaskGroupName, taskStartTime, roundTime, "FAILED", postgresConnectionInfo)
+        throw new Exception(errorMsg.toString())
       }
-      finally{
-        taskGroupConnection.close()
-      }
+      updateTaskgroupLogs(dependencyCheckModel.getTaskGroupName, taskStartTime, roundTime, "SUCCESS", postgresConnectionInfo)
       executeResult
     }
     else {
       val executeResult = new util.ArrayList[ExecuteResponse]()
       val query =
-        f"""select * from $schemaName.$tblConfName where lower(job_nm) = lower('${dependencyCheckModel.getJobName}')
+        f"""select * from $schemaName.${tblConfName.head} where lower(job_nm) = lower('${dependencyCheckModel.getJobName}')
            | and lower(active_flag) = lower('Y')
            |""".stripMargin
       val taskGroupConnection = ConnectionService.postgresqlQueryDirectly(
@@ -318,8 +338,8 @@ trait CustomFw {
         taskGroupConnection.close()
       }
       executeResult.add(CompletableFuture.completedFuture(
-        doRunFramework(dependencyCheckModel, jobType,
-          row.getAs[String]("job_nm"), row, tblConfName,
+        doRunFramework(dependencyCheckModel, jobType.head,
+          row.getAs[String]("job_nm"), row, tblConfName.head,
           httpServletRequest, loginUser.getUsername,roundTime)).get().get())
       executeResult
     }
