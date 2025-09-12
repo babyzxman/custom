@@ -189,13 +189,14 @@ object DataValidator {
         }
       })
       if(schemaFoundCount.equals(autoGenerateColName.size)) {
-        return tmpzTable.select(col("*"),
+        val tempTable = tmpzTable.select(col("*"),
           lit(executionId).cast(IntegerType).as("execution_id"),
           lit(jobNm),current_timestamp().as("dw_last_update_time"))
+        return tempTable.select(targetTableDf.schema.fieldNames.map(tmpzTable(_)): _*)
       }
-      return tmpzTable
+      return tmpzTable.select(targetTableDf.schema.fieldNames.map(tmpzTable(_)): _*)
     }
-    tmpzTable
+    tmpzTable.select(targetTableDf.schema.fieldNames.map(tmpzTable(_)): _*)
   }
 
   def validateTblOperation(jobName: String, schemaName: String,
