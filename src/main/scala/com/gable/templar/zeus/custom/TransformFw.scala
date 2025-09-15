@@ -270,8 +270,6 @@ class TransformFw(override val schemaName: String,
     }
   }
 
-
-
   def generateDeltaLogWherePartitionCondition(tableName: String,sparkSession: SparkSession,
                                               partitionConditions: List[PartitionCondition]): List[String] = {
     val snap = DeltaLog.forTable(sparkSession,getTableIdentifierFromTableName(tableName)).snapshot
@@ -306,7 +304,7 @@ class TransformFw(override val schemaName: String,
         }
         count += 1
       })
-      deletePartitionList += fullPartitionPath.toString()
+      deletePartitionList = deletePartitionList :+ fullPartitionPath.toString()
     }
     deletePartitionList
     // Extract partition maps from rows
@@ -474,7 +472,7 @@ class TransformFw(override val schemaName: String,
               val runParallelResult: RunParallelResult = new RunParallelResult
               var partitionConditionList: List[PartitionCondition] = List.empty
               if(JOB_TYPE.equals(JobConstant.JOB_TYPE.TRANSFORM)) {
-                val backlogTime = controlJobDf.getAs[Int]("backlog_time")
+                val backlogTime = controlJobDf.getAs[Int]("backlog_times")
                 val partitionCondMaster = controlJobDf.getAs[String]("partition_condition")
                 if (partitionCondMaster != null) {
                   partitionConditionList = PartitionParsers.parseAnd(partitionCondMaster)

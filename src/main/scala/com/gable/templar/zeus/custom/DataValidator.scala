@@ -394,7 +394,7 @@ object DataValidator {
         spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
         val writer = tempTableDf.write.mode("overwrite")
         if (tableType.toLowerCase == "delta") {
-          spark.sql(f"delete from ${schemaTargetTbl} where ${generateWhereConditionFromDeletePartition(dropPartitionList)}")
+//          spark.sql(f"delete from ${schemaTargetTbl} where ${generateWhereConditionFromDeletePartition(dropPartitionList)}")
           writer.format("delta").insertInto(schemaTargetTbl)
         }
         else {

@@ -424,9 +424,9 @@ trait CustomFw {
         timeSleep = 30L
       }
     }
+    var attempt = 0
     while (!notebookList.isEmpty) {
       Thread.sleep(timeSleep * 1000)
-      var attempt = 0
       try {
         val response = RestTemplateFactoryUtil.getRestTemplar(token, true).postForObject(f"$heraUrl/private/notebook/session/parallel/check", notebookCheckParallelRequest, classOf[java.util.HashMap[String, java.util.HashMap[String, String]]])
         response.entrySet().forEach(r => {
@@ -445,6 +445,7 @@ trait CustomFw {
       }
       catch {
         case e: HttpServerErrorException.BadGateway =>
+          logger.error(e.getMessage,e)
           attempt += 1
           if(attempt >= RETRY_COUNT) {
             throw e
