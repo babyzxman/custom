@@ -180,8 +180,8 @@ class TransformFw(override val schemaName: String,
     specArg.add(roundTime.format(DateTimeFormatter.ofPattern(
       "yyyy-MM-dd HH:mm:ss.SSSSSS")))
     specArg.add(masterRefDate.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS")))
-    specArg.add(calOverLap(currentLocalDateRun,overlap,frequency).toString)
-    specArg.add(masterRefDate.toString)
+    specArg.add(calOverLap(currentLocalDateRun,overlap,frequency).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS")))
+    specArg.add(masterRefDate.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS")))
     if (controlJobDf.getAs[String]("specific_argument") != null) {
       val newArgs = controlJobDf.getAs[String]("specific_argument").replace("'", "\"")
       val specificArg = scalaObjectMapper.readValue(
@@ -387,7 +387,6 @@ class TransformFw(override val schemaName: String,
           }
         }
         val startIctrlDt = currentLocalDateRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
-        val endIctrlDt = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
         val sb = new StringBuilder()
         var isContinueRunning: Boolean = true
         var ictrlDtRun: LocalDateTime = null
@@ -396,6 +395,7 @@ class TransformFw(override val schemaName: String,
         breakable {
           while (isContinueRunning) {
             var runId = ""
+            var endIctrlDt: String = ""
             if (dependencyCheckModel.get_workflowId() != null) {
               runId = dependencyCheckModel.get_workflowId() + "|" + dependencyCheckModel.get_runId() + "|" + dependencyCheckModel.get_taskId()
             }
@@ -406,6 +406,7 @@ class TransformFw(override val schemaName: String,
             if (catchUpType.equalsIgnoreCase(CATCHUP_TYPE.SEQUENCE.getValue)) {
               if (masterRefDate.isAfter(currentLocalDateRun) || masterRefDate.isEqual(currentLocalDateRun)) {
                 ictrlDtRun = currentLocalDateRun
+                endIctrlDt = currentLocalDateRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
               }
               else if (currentLocalDateRun.isAfter(masterRefDate)) {
                 isContinueRunning = false
@@ -413,6 +414,7 @@ class TransformFw(override val schemaName: String,
               }
             }
             else {
+              endIctrlDt = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
               isContinueRunning = false
             }
             val refDateIctrlDt = ictrlDtRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
@@ -481,8 +483,8 @@ class TransformFw(override val schemaName: String,
                   val successList: util.ArrayList[String] = new util.ArrayList
                   runParallelResult.setSuccessList(successList)
                   for (countRemove <- 0 to backlogTime) {
-                    val localDateRun = minusDateByFrequency(ictrlDtRun, frequency, backlogTime - countRemove)
-                    val endDate = minusDateByFrequency(masterRefDate, frequency, backlogTime - countRemove)
+                    val localDateRun = minusDateByFrequency(currentLocalDateRun, frequency, backlogTime - countRemove)
+                    val endDate = minusDateByFrequency(ictrlDtRun,frequency, backlogTime - countRemove)
                     val refIctrlDt = localDateRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
                     val runNotebookParallelResult = doRunNotebookParallelInMain(
                       jobName, taskGroupName, controlJobDf, runId, roundTime, endDate,
@@ -510,7 +512,8 @@ class TransformFw(override val schemaName: String,
                 else {
                   val successList: util.ArrayList[String] = new util.ArrayList
                   val runNotebookParallelResult = doRunNotebookParallelInMain(
-                    jobName, taskGroupName, controlJobDf, runId, roundTime, masterRefDate, currentLocalDateRun,
+                    jobName, taskGroupName, controlJobDf, runId, roundTime,
+                    ictrlDtRun, currentLocalDateRun,
                     refDateIctrlDt, schemaMap, connectionInfo, JOB_TYPE,
                     dependencyCheckModel, httpServletRequest, username,
                     overlapTime, frequency)
@@ -631,7 +634,7 @@ class TransformFw(override val schemaName: String,
                   failedList.add(runNotebookParallelResult.getNotebookUrl)
                   postProcessOutbound(status,runId,
                     runNotebookParallelResult.getNotebookUrl,jobStartTime,
-                    LocalDateTime.now(),ictrlDtRun,connectionInfo,refDateIctrlDt,jobName,
+                    LocalDateTime.now(),roundTime,connectionInfo,refDateIctrlDt,jobName,
                     "tbl_trans_audit_logs",tblConfName,lastSuccessIctrlDt)
                   throw new RunNotebookParallelException(runNotebookParallelResult.getErrorMsg)
                 }
@@ -648,7 +651,7 @@ class TransformFw(override val schemaName: String,
                   "tbl_trans_audit_detail_next_logs")
                 postProcessOutbound(status,runId,
                   runNotebookParallelResult.getNotebookUrl,jobStartTime,
-                  LocalDateTime.now(),ictrlDtRun,connectionInfo,refDateIctrlDt,jobName,
+                  LocalDateTime.now(),roundTime,connectionInfo,refDateIctrlDt,jobName,
                   "tbl_trans_audit_logs",tblConfName,lastSuccessIctrlDt)
               }
               if (catchUpType.equalsIgnoreCase(CATCHUP_TYPE.SEQUENCE.getValue)) {

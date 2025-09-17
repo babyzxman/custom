@@ -167,7 +167,7 @@ class IngestFw(override val schemaName: String,
 
   def checkFrequencyAndTgtFmt(frequency: String, ictrlDtTgtFmt: String): Boolean = {
     val correctFormat = frequency.toLowerCase match {
-      case "daily" => {
+      case "daily" | "weekly" => {
         "yyyyMMdd"
       }
       case "monthly" => {
@@ -421,7 +421,9 @@ class IngestFw(override val schemaName: String,
             dependencyCheckModel.setModuleNotebookName("zeppelin-se-uat-g")
           var masterRefDate: LocalDateTime = null
           val frequency = controlJobDf.getAs[String]("frequency")
-          val backdate = controlJobDf.getAs[Any]("back_day")
+          var backdate: Any = 0
+          if(!JOB_TYPE.equals(JobConstant.JOB_TYPE.KAFKA))
+            backdate = controlJobDf.getAs[Any]("back_day")
           var currentLocalDateRun: LocalDateTime = null
           val taskGroupName = controlJobDf.getAs[String]("tasksgroup_nm")
           val catchUpType = JobConstant.CATCHUP_TYPE.SEQUENCE.getValue

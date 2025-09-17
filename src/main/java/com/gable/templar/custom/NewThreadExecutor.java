@@ -11,8 +11,8 @@ public class NewThreadExecutor {
 
     static {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(60);         // keep 20 threads alive
-        executor.setMaxPoolSize(70);          // allow burst up to 40
+        executor.setCorePoolSize(130);         // keep 20 threads alive
+        executor.setMaxPoolSize(140);          // allow burst up to 40
         executor.setQueueCapacity(10);       // buffer before creating more threads
         executor.setKeepAliveSeconds(60);     // non-core threads die after idle
         executor.setThreadNamePrefix("MyCustomThreadPool-");
