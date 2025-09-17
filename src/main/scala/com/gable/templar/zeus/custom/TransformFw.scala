@@ -1309,7 +1309,7 @@ class TransformFw(override val schemaName: String,
             connectionInfo.getDbName, connectionInfo.getUserNm,
             connectionInfo.getPassword, formattedQuery)
           try {
-            checkExistsDataWithCheckMiss(records.rs, listDateTarget, prerequisiteJobNm, emptyFlagInt, null)
+            checkExistsDataWithOutCheckMiss(records.rs, listDateTarget.head, prerequisiteJobNm,emptyFlagInt,null)
           }
           finally {
             records.close()
