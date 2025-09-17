@@ -6,9 +6,7 @@ import com.gable.templar.constant.JobConstant.{CATCHUP_TYPE, JOB_TYPE, LOAD_TYPE
 import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse, RunNotebookParallelResult, RunParallelResult}
 import com.gable.templar.exception.RunNotebookParallelException
 import com.gable.templar.heaven.exception.InvalidArgumentException
-import com.gable.templar.heaven.util.RestTemplateFactoryUtil
 
-import scala.jdk.CollectionConverters._
 import com.gable.templar.zeus.SparkServer
 import com.gable.templar.zeus.controller.model.LoginUser
 import com.gable.templar.zeus.controller.tablemanage.view.PartitionCondition
