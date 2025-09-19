@@ -322,6 +322,7 @@ class TransformFw(override val schemaName: String,
         if(dependencyCheckModel.getModuleNotebookName == null)
           dependencyCheckModel.setModuleNotebookName("zeppelin-se-uat-g")
         var masterRefDate: LocalDateTime = null
+        var processJobType: String = "ongoing"
         val frequency = controlJobDf.getAs[String]("frequency")
         val backdate = controlJobDf.getAs[Any]("back_day")
         var currentLocalDateRun: LocalDateTime = null
@@ -372,6 +373,7 @@ class TransformFw(override val schemaName: String,
               masterRefDate = parseToLocalDateTime(dependencyCheckModel.getFixedDate,dateFormatIctrlDtForTb).get
             }
           }
+          processJobType = "manual"
         }
         if(currentDateRun == null || LOAD_TYPE.FULL_LOAD.getValue.equals(loadType)) {
           currentLocalDateRun = masterRefDate
@@ -425,7 +427,8 @@ class TransformFw(override val schemaName: String,
             try {
               checkRunningIctrlDt(
                 dependencyCheckModel.getJobName,catchUpType, dateFormatIctrlDtForTb,
-                frequency,currentLocalDateRun,masterRefDate,connectionInfo,runId,roundTime)
+                frequency,currentLocalDateRun,masterRefDate,connectionInfo,runId,
+                roundTime,processJobType)
               var startDetailTime = LocalDateTime.now()
               val schemaMap = getVariableSchemaMapNameFromConstant
               breakable {
@@ -710,7 +713,8 @@ class TransformFw(override val schemaName: String,
                           ictrlDtPattern: String,
                           frequency: String,startTime: LocalDateTime,
                           endTime: LocalDateTime,connectionInfo: ConnectionInfo,
-                          dagRunId: String,roundTime: LocalDateTime): Unit = {
+                          dagRunId: String,roundTime: LocalDateTime,
+                          processJobType: String): Unit = {
     var listICtrlDtQuery: List[String] = List.empty[String]
     if(catchUpType.equals(CATCHUP_TYPE.PERIOD.getValue)) {
       var startTimeTemp: LocalDateTime = startTime
@@ -727,21 +731,55 @@ class TransformFw(override val schemaName: String,
     val queryTransLog = f"""
     SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, schema_nm, table_nm, job_start_time, job_end_time, ictrl_dt as ictrl_dt, status
     FROM $schemaName.tbl_trans_audit_logs
-    WHERE job_nm = '$jobName' AND ictrl_dt IN (${listICtrlDtQuery.mkString(",")}) AND status = 'RUNNING'
-    AND dag_run_id != '$dagRunId' AND round_time != '$roundTime'
-    ORDER BY round_time DESC
+    WHERE job_nm = '$jobName' AND ictrl_dt IN (${listICtrlDtQuery.mkString(",")}) AND (status = 'RUNNING' OR status = 'WAITING')
+    AND round_time != '$roundTime'
+    ORDER BY job_start_time DESC
     LIMIT 1
     """
     val dfResultLog = ConnectionService.postgresqlQueryDirectly(connectionInfo.getIp, connectionInfo.getPort,
       connectionInfo.getDbName, connectionInfo.getUserNm,
       connectionInfo.getPassword,queryTransLog)
     try {
-      while (dfResultLog.rs.next()) {
-        throw new InvalidArgumentException(s"DropDuplicatesJobError: $jobName")
+      breakable {
+        while (dfResultLog.rs.next()) {
+          val lastRoundTimeWIctrlDt = dfResultLog.rs.getTimestamp("job_start_time")
+          val strFormatRoundTime = new java.text.SimpleDateFormat("yyyyMMdd").format(lastRoundTimeWIctrlDt)
+          val strRoundTimeIn = roundTime.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
+          if (strFormatRoundTime != strRoundTimeIn) {
+            logger.info("Check log Complete, current round_time is newer by 1 day than the last round_time.")
+            break()
+          }
+          else {
+            throw new InvalidArgumentException(s"DropDuplicatesJobError: $jobName")
+          }
+        }
       }
     }
     finally{
       dfResultLog.close()
+    }
+    if (processJobType == "ongoing" && checkFrequencyAndTgtFmt(frequency,ictrlDtPattern)) {
+      val queryTransLog = f"""
+      SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, schema_nm, table_nm, job_start_time, job_end_time, ictrl_dt as ictrl_dt, status
+      FROM $schemaName.tbl_trans_audit_logs
+      WHERE job_nm = '$jobName' AND ictrl_dt IN (${listICtrlDtQuery.mkString(",")}) AND status = 'SUCCEED'
+      AND round_time != '$roundTime'
+      ORDER BY round_time DESC
+      LIMIT 1
+      """
+      val dfResultLog = ConnectionService.postgresqlQueryDirectly(connectionInfo.getIp, connectionInfo.getPort,
+        connectionInfo.getDbName, connectionInfo.getUserNm,
+        connectionInfo.getPassword,queryTransLog)
+      try {
+        breakable {
+          while (dfResultLog.rs.next()) {
+            throw new InvalidArgumentException(s"DropDuplicatesJobError: $jobName")
+          }
+        }
+      }
+      finally{
+        dfResultLog.close()
+      }
     }
   }
 
