@@ -16,6 +16,20 @@ public class ConnectionInfo {
 
     private String dbType;
 
+    public ConnectionInfo() {}
+
+    public ConnectionInfo(String ip, String sid, String port,
+                          String dbName, String userNm, String password,
+                          String dbType) {
+        this.ip = ip;
+        this.sid = sid;
+        this.port = port;
+        this.dbName = dbName;
+        this.userNm = userNm;
+        this.password = password;
+        this.dbType = dbType;
+    }
+
     public String getIp() {
         return ip;
     }

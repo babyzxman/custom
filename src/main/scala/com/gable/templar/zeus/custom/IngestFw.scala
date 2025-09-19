@@ -165,21 +165,6 @@ class IngestFw(override val schemaName: String,
 //    }
   }
 
-  def checkFrequencyAndTgtFmt(frequency: String, ictrlDtTgtFmt: String): Boolean = {
-    val correctFormat = frequency.toLowerCase match {
-      case "daily" | "weekly" => {
-        "yyyyMMdd"
-      }
-      case "monthly" => {
-        "yyyyMM"
-      }
-      case "hourly" => {
-        "yyyyMMddHH"
-      }
-    }
-    correctFormat == ictrlDtTgtFmt
-  }
-
   def checkRunningIctrlDtIngest(jobNmUpdate: String, tasksgroupNmUpdate: String,
                                  ictrlDtUpdate: String, roundTime: LocalDateTime, jobStartTimeUpdate: LocalDateTime,
                                  startIctrlDtStrUpdate: String, endIctrlDtStrUpdate: String, processJobType: String,
@@ -199,7 +184,7 @@ class IngestFw(override val schemaName: String,
     WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroup_nm) =
     lower('$tasksgroupNmUpdate') AND ictrl_dt = '$ictrlDtUpdate' AND (status = 'RUNNING' OR status = 'WAITING')
     AND round_time != '$roundTime'
-    ORDER BY round_time DESC
+    ORDER BY job_start_time DESC
     LIMIT 1
     """
     } else {
@@ -209,7 +194,7 @@ class IngestFw(override val schemaName: String,
     FROM $ingestAuditLogsTable
     WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroup_nm) = lower('$tasksgroupNmUpdate')
     AND ictrl_dt IS NOT NULL AND (status = 'RUNNING' OR status = 'WAITING') AND round_time != '$roundTime'
-    ORDER BY round_time DESC
+    ORDER BY job_start_time DESC
     LIMIT 1
     """
     }
@@ -220,7 +205,7 @@ class IngestFw(override val schemaName: String,
       // Has Log Running
       breakable {
         while (dfResultLog.rs.next()) {
-          val lastRoundTimeWIctrlDt = dfResultLog.rs.getTimestamp("round_time")
+          val lastRoundTimeWIctrlDt = dfResultLog.rs.getTimestamp("job_start_time")
 
           val strFormatRoundTime = new java.text.SimpleDateFormat("yyyyMMdd").format(lastRoundTimeWIctrlDt)
           val strRoundTimeIn = roundTime.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
@@ -448,7 +433,15 @@ class IngestFw(override val schemaName: String,
             origRefDate =  dependencyCheckModel.get_bldEndDate().toLocalDateTime
           }
           else {
-            val tempDateTime = parseToLocalDateTime(dependencyCheckModel.getFixedDate, dateFormatIctrlDtForTb).get
+            var tempDateTime: LocalDateTime = null
+            try{
+              tempDateTime =  parseToLocalDateTime(dependencyCheckModel.getFixedDate,"yyyyMMdd").get
+            }
+            catch {
+              case ex: Exception => {
+                tempDateTime = parseToLocalDateTime(dependencyCheckModel.getFixedDate, dateFormatIctrlDtForTb).get
+              }
+            }
             masterRefDate = truncateToFormat(tempDateTime,dateFormatIctrlDtForTb)
             origRefDate = tempDateTime
             processJobType = "manual"

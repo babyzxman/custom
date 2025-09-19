@@ -59,20 +59,20 @@ object DataValidator {
     })
   }
 
-  def convertToDeleteCondition(partitionStr: String): String = {
+  def convertToDeleteCondition(partitionStr: String,alias: String): String = {
     val partitions = partitionStr.split("/")
     partitions.map { p =>
       val Array(col, value) = p.split("=")
-      s"$col='$value'"
+      s"$alias.$col='$value'"
     }.mkString(" AND ")
   }
 
-  def generateWhereConditionFromDeletePartition(deletePartitions: List[String]): String = {
+  def generateWhereConditionFromDeletePartition(deletePartitions: List[String],alias: String): String = {
     if(deletePartitions.nonEmpty) {
       val sb = new StringBuilder()
       var count = 0
       for (partitionToDelete <- deletePartitions) {
-        sb.append(f" (${convertToDeleteCondition(partitionToDelete)})")
+        sb.append(f" (${convertToDeleteCondition(partitionToDelete,alias)})")
         if (count < deletePartitions.size - 1) {
           sb.append(" OR ")
         }
@@ -306,7 +306,8 @@ object DataValidator {
 
     // Rewrite of `upsert_condition`
     def upsertCondition(tmpValidationDF: DataFrame, targetTblName: String, uniqueKey: String, mergeCondition: Option[String],
-                        updateColumn: List[String],spark: SparkSession): Unit = {
+                        updateColumn: List[String],spark: SparkSession,
+                        dropPartitionList: List[String]): Unit = {
       val deltaTable = DeltaTable.forName(spark, targetTblName)
       var uniqueKeyList : List[String] = List.empty
       if(uniqueKey != null) {
@@ -317,12 +318,12 @@ object DataValidator {
       val mergeCond = mergeCondition.orNull
       val joinCondition = uniqueKeyList.map(key => s"trg.$key = src.$key").mkString(" AND ")
       val fullMergeCondition = if(mergeCond != null) {
-        s"$joinCondition AND $mergeCond"
+        s"$joinCondition AND $mergeCond AND (${generateWhereConditionFromDeletePartition(dropPartitionList,"trg")})"
       }
       else {
-        joinCondition
+        s"$joinCondition AND (${generateWhereConditionFromDeletePartition(dropPartitionList,"trg")})"
       }
-
+      logger.info("join condition = {}",joinCondition)
       val updateSetClause = if (updateColumn.nonEmpty) {
         updateColumn.filter(_ != "load_ts").map(c => (c, col(s"src.$c"))).toMap
       } else {
@@ -391,13 +392,15 @@ object DataValidator {
 
       case "overwrite" if partitionColumns.nonEmpty =>
         println("Overwrite with partition")
-        spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-        val writer = tempTableDf.write.mode("overwrite")
         if (tableType.toLowerCase == "delta") {
-//          spark.sql(f"delete from ${schemaTargetTbl} where ${generateWhereConditionFromDeletePartition(dropPartitionList)}")
+          spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+          val writer = tempTableDf.write.mode("overwrite")
+          //          spark.sql(f"delete from ${schemaTargetTbl} where ${generateWhereConditionFromDeletePartition(dropPartitionList)}")
           writer.format("delta").insertInto(schemaTargetTbl)
         }
         else {
+          spark.conf.set("spark.sql.sources.partitionOverwriteMode", "static")
+          val writer = tempTableDf.write.mode("append")
           val path = spark.sessionState.catalog.getTableMetadata(TableIdentifier(tblName,Some(schemaName))).location.toString
           deletePartition(path,schemaTargetTbl,spark,dropPartitionList)
           writer.insertInto(schemaTargetTbl)
@@ -415,7 +418,8 @@ object DataValidator {
           uniqueKey = uniqueKey,
           mergeCondition = updateCondition,
           updateColumn = updateColumn,
-          spark
+          spark,
+          dropPartitionList
         )
 
       case "update" =>

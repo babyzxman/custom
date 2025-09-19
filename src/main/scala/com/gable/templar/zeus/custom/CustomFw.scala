@@ -48,7 +48,7 @@ trait CustomFw {
 
   val HOURS_CHECK_ROUND_TIME = 3
 
-  val CONCURRENT_SCHEDULE = 4
+  val CONCURRENT_SCHEDULE = 15
 
 
   var tmpzSchema: String = {
@@ -229,6 +229,21 @@ trait CustomFw {
     }
     val df = spark.createDataFrame(spark.sparkContext.parallelize(rows), schema)
     df.collect()
+  }
+
+  def checkFrequencyAndTgtFmt(frequency: String, ictrlDtTgtFmt: String): Boolean = {
+    val correctFormat = frequency.toLowerCase match {
+      case "daily" | "weekly" => {
+        "yyyyMMdd"
+      }
+      case "monthly" => {
+        "yyyyMM"
+      }
+      case "hourly" => {
+        "yyyyMMddHH"
+      }
+    }
+    correctFormat == ictrlDtTgtFmt
   }
 
 
@@ -754,7 +769,7 @@ trait CustomFw {
     } else {
       val status = records.head.getString(3)
       val rowCnt = if (records.head.get(4) != null) records.head.getLong(4) else 0L
-      if (status == "SUCCEED" && rowCnt >= emptyFlag) {
+      if ((status == "SUCCEED" || status.toLowerCase() == "success") && rowCnt >= emptyFlag) {
         println("table is ready.")
         (true, Map(prerequisiteJobNameStr -> List()))
       } else {
@@ -770,7 +785,8 @@ trait CustomFw {
     var successFulRecordsDate: List[LocalDateTime] = List.empty
     var isRecordExists: Boolean = false
     while(records.next()) {
-      if(records.getString(4) == "SUCCEED" && records.getLong(5) >= emptyFlag) {
+      val status = records.getString(4)
+      if((status == "SUCCEED" || status.toLowerCase() == "success") && records.getLong(5) >= emptyFlag) {
         successFulRecordsDate =successFulRecordsDate :+ parseToLocalDateTime(records.getString(3),patternIctrlDateCheck).get
       }
       isRecordExists = true
@@ -799,7 +815,8 @@ trait CustomFw {
     var listLogDate: List[String] = List.empty[String]
     var isRecordExists: Boolean = false
     while(records.next()) {
-      if(records.getLong(5) >= emptyFlag && records.getString(4) == "SUCCEED") {
+      val status = records.getString(4)
+      if(records.getLong(5) >= emptyFlag && (status == "SUCCEED" || status.toLowerCase() == "success")) {
         listLogDate = listLogDate :+ records.getString(3)
       }
       isRecordExists = true
@@ -919,7 +936,7 @@ trait CustomFw {
       val status = records.getString(4)
       logger.info("status = {}",status)
       val rowCnt = records.getLong(5)
-      if (status == "SUCCEED" && rowCnt >= emptyFlag) {
+      if ((status == "SUCCEED" || status.toLowerCase() == "success") && rowCnt >= emptyFlag) {
         println("table is ready.")
         return (true, Map(prerequisiteJobNameStr -> List()))
       }
@@ -941,13 +958,13 @@ trait CustomFw {
 
     val queryTableSourceCheck = Map(
       "tbl_source_1_day" ->
-        s"""SELECT `$businessColumn` FROM $prerequisiteSchema.$prerequisiteTable WHERE `$businessColumn` = '$targetDate' GROUP BY `$businessColumn`""",
+        s"""SELECT `$businessColumn` FROM $prerequisiteSchema.$prerequisiteTable WHERE `$businessColumn` = '$targetDate' limit 1 """,
       "tbl_source_multi_day" ->
-        s"""SELECT `$businessColumn` FROM $prerequisiteSchema.$prerequisiteTable WHERE `$businessColumn` $targetDate GROUP BY `$businessColumn`""",
+        s"""SELECT `$businessColumn` FROM $prerequisiteSchema.$prerequisiteTable WHERE `$businessColumn` $targetDate limit 1""",
       "tbl_source_max_day" ->
-        s"""SELECT `$businessColumn` FROM $prerequisiteSchema.$prerequisiteTable GROUP BY `$businessColumn`""",
+        s"""SELECT `$businessColumn` FROM $prerequisiteSchema.$prerequisiteTable limit 1""",
       "tbl_source_max_day_between" ->
-        s"""SELECT `$businessColumn` FROM $prerequisiteSchema.$prerequisiteTable WHERE `$businessColumn` >= '$targetDate' GROUP BY `$businessColumn`"""
+        s"""SELECT `$businessColumn` FROM $prerequisiteSchema.$prerequisiteTable WHERE `$businessColumn` >= '$targetDate' limit 1"""
     )
 
     // Determine the query to use based on frequencyCheck

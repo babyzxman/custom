@@ -29,11 +29,11 @@ class GeneralService {
                      transformFw: CustomFw,ingestFw: IngestFw,
                      schemaName: String): ExecuteResponseWrap = {
     val sparkSession = SparkServer.getZeusSession.session
-    var jobType: List[JOB_TYPE] = List.empty
     val queryMasterSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = 'fw_postgre'"
     val postgresConnectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql, salt, ultKey)
     val executeResponseWrap = new ExecuteResponseWrap
     if(params.getJobNames == null || params.getJobNames.isEmpty) {
+      var jobType: List[JOB_TYPE] = List.empty
       if (params.getTaskGroupName != null) {
         jobType = checkJobTypeFromTaskGroup(params.getTaskGroupName, sparkSession, schemaName)
       }
@@ -46,8 +46,10 @@ class GeneralService {
     else {
       val executeResponseList: java.util.ArrayList[ExecuteResponse] = new util.ArrayList[ExecuteResponse]()
       params.getJobNames.forEach(j => {
+        var jobType: List[JOB_TYPE] = List.empty
         jobType = jobType :+ checkJobTypeFromJobName(j, schemaName, postgresConnectionInfo)
         val customFw = getCustomFwClassByJobType(jobType.head,transformFw,ingestFw)
+        params.setJobName(j)
         executeResponseList.addAll(customFw.doRunTaskGroup(params, jobType))
       })
       executeResponseWrap.setExecuteResponseList(executeResponseList)
