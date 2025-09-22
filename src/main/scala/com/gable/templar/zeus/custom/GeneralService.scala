@@ -28,14 +28,13 @@ class GeneralService {
   def doRunFrameWork(params: DependencyCheckModel,
                      transformFw: CustomFw,ingestFw: IngestFw,
                      schemaName: String): ExecuteResponseWrap = {
-    val sparkSession = SparkServer.getZeusSession.session
     val queryMasterSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = 'fw_postgre'"
     val postgresConnectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql, salt, ultKey)
     val executeResponseWrap = new ExecuteResponseWrap
     if(params.getJobNames == null || params.getJobNames.isEmpty) {
       var jobType: List[JOB_TYPE] = List.empty
       if (params.getTaskGroupName != null) {
-        jobType = checkJobTypeFromTaskGroup(params.getTaskGroupName, sparkSession, schemaName)
+        jobType = checkJobTypeFromTaskGroup(params.getTaskGroupName, postgresConnectionInfo, schemaName)
       }
       else {
         jobType = jobType :+ checkJobTypeFromJobName(params.getJobName, schemaName, postgresConnectionInfo)
@@ -57,32 +56,92 @@ class GeneralService {
     executeResponseWrap
   }
 
-  def checkJobTypeFromTaskGroup(taskGroupName: String,sparkSession: SparkSession, schemaName: String): List[JOB_TYPE] = {
+  def checkJobTypeFromTaskGroup(taskGroupName: String,postgresConnection : ConnectionInfo, schemaName: String): List[JOB_TYPE] = {
     var jobTypeList: List[JOB_TYPE] = List.empty
-    if(!sparkSession.sql(f"select * from ${schemaName}.tbl_job_trans where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
-      jobTypeList :+ JOB_TYPE.TRANSFORM
+    val sql = f"select * from ${schemaName}.tbl_job_trans where tasksgroup_nm = '${taskGroupName}'"
+    val df = ConnectionService.postgresqlQueryDirectly(postgresConnection.getIp,
+      postgresConnection.getPort, postgresConnection.getDbName,
+      postgresConnection.getUserNm,postgresConnection.getPassword,sql)
+    var isInTransformType = false
+    try {
+      while (df.rs.next()) {
+        jobTypeList = jobTypeList :+ JOB_TYPE.TRANSFORM
+        isInTransformType = true
+      }
     }
-    else if(!sparkSession.sql(f"select * from ${schemaName}.tbl_job_outbound where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
-      jobTypeList :+ JOB_TYPE.OUTBOUND
+    finally {
+      df.close()
     }
-    else {
-      if (!sparkSession.sql(f"select * from ${schemaName}.${JobConstant.tableNmApiIngestion} where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
-        jobTypeList = jobTypeList :+ JOB_TYPE.INGEST_API
+    var isInOutboundType = false
+    if(!isInTransformType) {
+      val sql = f"select * from ${schemaName}.tbl_job_outbound where tasksgroup_nm = '${taskGroupName}'"
+      val df = ConnectionService.postgresqlQueryDirectly(postgresConnection.getIp,
+        postgresConnection.getPort, postgresConnection.getDbName,
+        postgresConnection.getUserNm,postgresConnection.getPassword,sql)
+      try {
+        while (df.rs.next()) {
+          jobTypeList = jobTypeList :+ JOB_TYPE.OUTBOUND
+          isInOutboundType = true
+        }
       }
-      if (!sparkSession.sql(f"select * from ${schemaName}.${JobConstant.tableNmDbIngestion} where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
-        jobTypeList = jobTypeList :+ JOB_TYPE.INGEST_DB
+      finally {
+        df.close()
       }
-      if (!sparkSession.sql(f"select * from ${schemaName}.${JobConstant.tableNmFileIngestion} where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
-        jobTypeList = jobTypeList :+ JOB_TYPE.FILE
-      }
-      if (!sparkSession.sql(f"select * from $schemaName.${JobConstant.tableNmKafkaIngestion} where tasksgroup_nm = '${taskGroupName}'").isEmpty) {
-        jobTypeList = jobTypeList :+ JOB_TYPE.KAFKA
-      }
-      if (jobTypeList.isEmpty) {
-        throw new InvalidArgumentException("The config job name is not in TBL_CONFIG")
-      }
-      jobTypeList
     }
+    if(!isInTransformType && !isInOutboundType) {
+      var sql = f"select * from ${schemaName}.${JobConstant.tableNmApiIngestion} where tasksgroup_nm = '${taskGroupName}'"
+      var df = ConnectionService.postgresqlQueryDirectly(postgresConnection.getIp,
+        postgresConnection.getPort, postgresConnection.getDbName,
+        postgresConnection.getUserNm,postgresConnection.getPassword,sql)
+      try {
+        while (df.rs.next()) {
+          jobTypeList = jobTypeList :+ JOB_TYPE.INGEST_API
+        }
+      }
+      finally {
+        df.close()
+      }
+      sql = f"select * from ${schemaName}.${JobConstant.tableNmDbIngestion} where tasksgroup_nm = '${taskGroupName}'"
+      df = ConnectionService.postgresqlQueryDirectly(postgresConnection.getIp,
+        postgresConnection.getPort, postgresConnection.getDbName,
+        postgresConnection.getUserNm,postgresConnection.getPassword,sql)
+      try {
+        while (df.rs.next()) {
+          jobTypeList = jobTypeList :+ JOB_TYPE.INGEST_DB
+        }
+      }
+      finally {
+        df.close()
+      }
+      sql = f"select * from ${schemaName}.${JobConstant.tableNmFileIngestion} where tasksgroup_nm = '${taskGroupName}'"
+      df = ConnectionService.postgresqlQueryDirectly(postgresConnection.getIp,
+        postgresConnection.getPort, postgresConnection.getDbName,
+        postgresConnection.getUserNm,postgresConnection.getPassword,sql)
+      try {
+        while (df.rs.next()) {
+          jobTypeList = jobTypeList :+ JOB_TYPE.FILE
+        }
+      }
+      finally {
+        df.close()
+      }
+      sql = f"select * from $schemaName.${JobConstant.tableNmKafkaIngestion} where tasksgroup_nm = '${taskGroupName}'"
+      df = ConnectionService.postgresqlQueryDirectly(postgresConnection.getIp,
+        postgresConnection.getPort, postgresConnection.getDbName,
+        postgresConnection.getUserNm,postgresConnection.getPassword,sql)
+      try {
+        while (df.rs.next()) {
+          jobTypeList = jobTypeList :+ JOB_TYPE.KAFKA
+        }
+      }
+      finally {
+        df.close()
+      }
+    }
+    if (jobTypeList.isEmpty) {
+      throw new InvalidArgumentException("The config job name is not in TBL_CONFIG")
+    }
+    jobTypeList
   }
 
   def checkJobTypeFromJobName(jobName: String,schemaName: String,postgresConnection: ConnectionInfo): JOB_TYPE = {
