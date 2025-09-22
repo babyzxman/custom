@@ -384,11 +384,10 @@ object DataValidator {
     val tableType = checkTableType(schemaTargetTbl)
     tempTableDf = withColumnIncaseOfMissingColumn(tempTableDf,schemaTargetTbl,spark,jobNm)
     insertMode.toLowerCase match {
-      case "full_load" | "overwrite" if partitionColumns.isEmpty =>
-        println("Full_load")
+      case "full_load" | "overwrite" if (insertMode.toLowerCase() == "full_load") || (partitionColumns.isEmpty) =>
         val writer = tempTableDf.write.mode("overwrite")
-        if (tableType.toLowerCase == "delta") writer.format("delta").saveAsTable(schemaTargetTbl)
-        else writer.saveAsTable(schemaTargetTbl)
+        if (tableType.toLowerCase == "delta") writer.format("delta").insertInto(schemaTargetTbl)
+        else writer.format("parquet").insertInto(schemaTargetTbl)
 
       case "overwrite" if partitionColumns.nonEmpty =>
         println("Overwrite with partition")
