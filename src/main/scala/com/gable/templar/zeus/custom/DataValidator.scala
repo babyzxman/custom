@@ -385,6 +385,7 @@ object DataValidator {
     tempTableDf = withColumnIncaseOfMissingColumn(tempTableDf,schemaTargetTbl,spark,jobNm)
     insertMode.toLowerCase match {
       case "full_load" | "overwrite" if (insertMode.toLowerCase() == "full_load") || (partitionColumns.isEmpty) =>
+        spark.conf.set("spark.sql.sources.partitionOverwriteMode", "static")
         val writer = tempTableDf.write.mode("overwrite")
         if (tableType.toLowerCase == "delta") writer.format("delta").insertInto(schemaTargetTbl)
         else writer.format("parquet").insertInto(schemaTargetTbl)
