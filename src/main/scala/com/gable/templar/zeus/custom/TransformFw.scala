@@ -6,13 +6,13 @@ import com.gable.templar.constant.JobConstant.{CATCHUP_TYPE, JOB_TYPE, LOAD_TYPE
 import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse, RunNotebookParallelResult, RunParallelResult}
 import com.gable.templar.exception.RunNotebookParallelException
 import com.gable.templar.heaven.exception.InvalidArgumentException
-
 import com.gable.templar.zeus.SparkServer
 import com.gable.templar.zeus.controller.model.LoginUser
 import com.gable.templar.zeus.controller.tablemanage.view.PartitionCondition
 import com.gable.templar.zeus.service.spark.TableManageService.PATH_SEPERATOR
 import com.gable.templar.zeus.service.spark.{PartitionKey, SparkHiveMetaStoreService, TableManageService}
 import com.gable.templar.zeus.service.vector.ConnectionInfo
+import com.gable.templar.zeus.util.{Comparator, ComparatorUtil}
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.delta.DeltaLog
@@ -226,10 +226,103 @@ class TransformFw(override val schemaName: String,
     }
     var dropPartitionList = List[String]()
     if (null != partitionKeys && partitionKeys.nonEmpty) {
-      dropPartitionList = tableService.listPartitionsByFilter(tableName, ptConditionsGroup, partitionKeys)
+      dropPartitionList = listPartitionsByFilter(tableName, ptConditionsGroup, partitionKeys)
     }
     dropPartitionList
   }
+
+  def listPartitionsByFilter(tableName: String, ptConditionsGroup: Map[String, List[PartitionCondition]], partitionsKeys: List[PartitionKey]) = {
+    var existsPartitionList = sparkHiveMetaStoreService.getPartitionList(tableName)
+    /** find the deepest partition which is not considered by any conditions and split it out
+     * eg. dt=[]/dt_hour=[]/dt_min=[]/dt_sec=[]
+     * if filter condition deepest level is 'dt_min', should trim out 'dt_sec'
+     */
+    val conditionsKey = ptConditionsGroup.keys.toSet
+    var ignorePartition: String = null
+    if (ptConditionsGroup.nonEmpty) {
+//      breakable {
+//        for (pname <- partitionsKeys.map(_.name).reverse) {
+//          if (!conditionsKey.contains(pname)) {
+//            ignorePartition = pname
+//          } else {
+//            break
+//          }
+//        }
+//      }
+    } else if (partitionsKeys.size > 1) {
+      // if not specify any partition condition, and has more than 1 partition level: ignore since the second partition level
+      ignorePartition = partitionsKeys(1).name
+    }
+    if (ignorePartition != null) {
+      existsPartitionList = existsPartitionList.map(p => p.slice(0, p.indexOf(ignorePartition) - 1)).distinct
+    }
+
+    existsPartitionList = existsPartitionList.filter(existsPart => {
+      isPartitionInCondition(existsPart, ptConditionsGroup, partitionsKeys)
+    })
+    existsPartitionList
+  }
+
+  def isPartitionInCondition(existsPart: String, ptConditionsGroup: Map[String, List[PartitionCondition]], partitionsKeys: List[PartitionKey]): Boolean = {
+    val existsPartArray = leftTrim(existsPart,"/").split("/")
+    for (i <- 0 until existsPartArray.length) {
+      //extract value from each exists partition eg. dt=201902801
+      logger.debug(s"partition index ${i}: " + existsPartArray(i))
+      val subPartValue = existsPartArray(i).split("=")(1)
+      if (!ptConditionsGroup.contains(partitionsKeys(i).name)) {
+        // no filter for this partition level -> continue
+      } else {
+        // get all filter condition for this partition level
+        val partitionCondList = ptConditionsGroup.get(partitionsKeys(i).name).get
+        partitionCondList.foreach(partitionCond => {
+          val isSubPartInCondition = isSubPartitionInCondition(subPartValue, partitionCond, partitionsKeys(i))
+          logger.debug(s"partition index ${i}: compare ${subPartValue} - ${partitionCond.getValue}: ${isSubPartInCondition}")
+          if (!isSubPartInCondition) {
+            return false
+          }
+        })
+      }
+    }
+    return true
+  }
+
+  private def isSubPartitionInCondition(subPartValue: String, partitionCond: PartitionCondition, partitionsKeys: PartitionKey): Boolean = {
+    try {
+      if (partitionsKeys.ptype == "int") {
+        return ComparatorUtil.compareNumeric(subPartValue.toInt, partitionCond.getValue.toInt, partitionCond.getComparator)
+      } else if (partitionsKeys.ptype == "bigint") {
+        return ComparatorUtil.compareNumeric(subPartValue.toLong, partitionCond.getValue.toLong, partitionCond.getComparator)
+      } else if (partitionsKeys.ptype == "double") {
+        return ComparatorUtil.compareNumeric(subPartValue.toDouble, partitionCond.getValue.toDouble, partitionCond.getComparator)
+      } else if (partitionsKeys.ptype == "float") {
+        return ComparatorUtil.compareNumeric(subPartValue.toFloat, partitionCond.getValue.toFloat, partitionCond.getComparator)
+      } else {
+        if (partitionCond.getComparator != null && partitionCond.getComparator.trim != "" && Comparator.EQUAL.name != partitionCond.getComparator) {
+          throw new Exception(s"partition comparator ${partitionCond.getComparator} is not supported for [${partitionsKeys.name}]: ${partitionsKeys.ptype} data type")
+        }
+        return (subPartValue == partitionCond.getValue)
+        //        return subPartValue == URLEncoder.encode(partitionCond.getValue, "UTF-8")
+      }
+    } catch {
+      case ne: NumberFormatException => {
+        return false
+      }
+      case e: Exception => {
+        throw e
+      }
+    }
+    return true
+  }
+
+  private def leftTrim(str: String, char: String): String = {
+    if(str.startsWith(char)) {
+      println(str.indexOf(char))
+      str.substring(str.indexOf(char)+1)
+    } else {
+      str
+    }
+  }
+
 
   def deletePartition(path: String,
                       partitionConds:List[PartitionCondition],
@@ -596,6 +689,7 @@ class TransformFw(override val schemaName: String,
                     Some(controlJobDf.getAs[String]("update_condition")),
                     jobName, connectionInfo, sparkSession, tmpzSchema,updateCondition,
                     whereCondition,location.toString,dropPartitionList)
+                  println("drop partition list = {}",dropPartitionList)
                   if(isDeltaTable) {
                     sparkSession.sql(s"delete from ${tmpzSchema}.${tableName}_tmp_validation ${DataValidator.generateWhereConditionFromPartitionCondition(partitionConditionList)}")
                   }
