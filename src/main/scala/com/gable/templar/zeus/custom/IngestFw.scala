@@ -425,6 +425,8 @@ class IngestFw(override val schemaName: String,
           var currentDateRun = controlJobDf.getAs[String]("last_success_ictrl_dt")
           val lastSuccessIctrlDt = currentDateRun
           var processJobType: String = "ongoing"
+          val isSkipCatchUp = (controlJobDf.getAs[String]("ignore_catchup") != null &&
+            controlJobDf.getAs[String]("ignore_catchup") == "Y")
           var origRefDate: LocalDateTime = null
           if (dependencyCheckModel.getFixedDate == null || dependencyCheckModel.getFixedDate.isEmpty) {
             masterRefDate = minusDateByFrequency(
@@ -446,7 +448,7 @@ class IngestFw(override val schemaName: String,
             origRefDate = tempDateTime
             processJobType = "manual"
           }
-          if (currentDateRun == null || loadType.equals(LOAD_TYPE.FULL_LOAD.getValue)) {
+          if (currentDateRun == null || loadType.equals(LOAD_TYPE.FULL_LOAD.getValue) || isSkipCatchUp) {
             currentLocalDateRun = masterRefDate
             logger.info("current local date run init = {}",currentDateRun)
             currentDateRun = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))

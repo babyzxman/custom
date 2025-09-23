@@ -421,6 +421,8 @@ class TransformFw(override val schemaName: String,
         var currentLocalDateRun: LocalDateTime = null
         var catchUpType = controlJobDf.getAs[String]("catchup_type")
         var ictrlDtTgtFmt = controlJobDf.getAs[String]("ictrl_dt_tgtfmt")
+        val isSkipCatchUp = (controlJobDf.getAs[String]("ignore_catchup") != null &&
+          controlJobDf.getAs[String]("ignore_catchup") == "Y")
         var schemaNameFromTbl: String = null
         var tableName: String = null
         var loadType: String = null
@@ -468,7 +470,7 @@ class TransformFw(override val schemaName: String,
           }
           processJobType = "manual"
         }
-        if(currentDateRun == null || LOAD_TYPE.FULL_LOAD.getValue.equals(loadType)) {
+        if(currentDateRun == null || LOAD_TYPE.FULL_LOAD.getValue.equals(loadType) || isSkipCatchUp) {
           currentLocalDateRun = masterRefDate
           currentDateRun = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
         }
