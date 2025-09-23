@@ -1053,7 +1053,7 @@ class TransformFw(override val schemaName: String,
           (false, Map(prerequisiteJobNm -> listDateTarget))
         }
 
-      case "quarter" | "month_to_date" | "hour_to_date" | "daily_period" | "year_to_date" =>
+      case "quarter" | "month_to_date" | "hour_to_date" | "daily_period" | "year_to_date" | "current_quarter" =>
         val queryDictMultiDay = Map(
           "tbl_ingest_audit_logs" -> s"SELECT target_table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblIngestAuditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND target_schema_nm = '{{prerequisite_schema}}' AND target_table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC",
           "tbl_trans_audit_logs" -> s"SELECT table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblTauditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND schema_nm = '{{prerequisite_schema}}' AND table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC"
@@ -1068,7 +1068,7 @@ class TransformFw(override val schemaName: String,
               throw new InvalidArgumentException(s"values not in 1-4 quarter: $values")
             }
             val quarterStartMonth = monthStartList(valuesInt - 1)
-            println(s"Target Quarter : $valuesInt Month Quarter Start : $quarterStartMonth")
+            logger.info(s"Target Quarter : $valuesInt Month Quarter Start : $quarterStartMonth")
 
             val dateRun = masterRefDate
             val monthRun = dateRun.getMonthValue
@@ -1100,6 +1100,32 @@ class TransformFw(override val schemaName: String,
             val useBetweenQuery = checkOrderDatetimeFormat(patternIctrlDateCheck)
             if (useBetweenQuery) {
               targetDateQueryPart = s"BETWEEN '${quarterStartDate.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}' AND '${quarterEndDate.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}'"
+            } else {
+              targetDateQueryPart = s"IN (${listDateTarget.map(d => s"'$d'").mkString(", ")})"
+            }
+
+          case "current_quarter"=>
+            val monthStartList = List(1, 4, 7, 10)
+            val dateRun = masterRefDate
+            val monthRun = dateRun.getMonthValue
+            val currentQuarter = (monthRun - 1) / 3 + 1
+            val quarterStartDate = dateRun.withMonth(monthStartList(currentQuarter - 1)).withDayOfMonth(1).withHour(0)
+            var tempDate = quarterStartDate
+            while(!tempDate.isAfter(dateRun)) {
+              listDateTarget = listDateTarget :+ tempDate.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))
+              tempDate = if(patternIctrlDateCheck.equals("yyyyMM")) {
+                tempDate.plusMonths(1)
+              } else if(patternIctrlDateCheck.equals("yyyyMMdd")) {
+                tempDate.plusDays(1)
+              } else {
+                tempDate.plusHours(1)
+              }
+            }
+            listDateTarget = listDateTarget.distinct // Drop duplicates
+
+            val useBetweenQuery = checkOrderDatetimeFormat(patternIctrlDateCheck)
+            if (useBetweenQuery) {
+              targetDateQueryPart = s"BETWEEN '${quarterStartDate.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}' AND '${dateRun.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}'"
             } else {
               targetDateQueryPart = s"IN (${listDateTarget.map(d => s"'$d'").mkString(", ")})"
             }
