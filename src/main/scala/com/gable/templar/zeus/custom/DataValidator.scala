@@ -318,10 +318,18 @@ object DataValidator {
       val mergeCond = mergeCondition.orNull
       val joinCondition = uniqueKeyList.map(key => s"trg.$key = src.$key").mkString(" AND ")
       val fullMergeCondition = if(mergeCond != null) {
-        s"$joinCondition AND $mergeCond AND (${generateWhereConditionFromDeletePartition(dropPartitionList,"trg")})"
+        var tempCondition = s"$joinCondition AND $mergeCond "
+        if(dropPartitionList.nonEmpty) {
+          tempCondition = tempCondition + s"AND (${generateWhereConditionFromDeletePartition(dropPartitionList,"trg")})"
+        }
+        tempCondition
       }
       else {
-        s"$joinCondition AND (${generateWhereConditionFromDeletePartition(dropPartitionList,"trg")})"
+        var tempCondition = s"$joinCondition"
+        if(dropPartitionList.nonEmpty) {
+          tempCondition = tempCondition + s"AND (${generateWhereConditionFromDeletePartition(dropPartitionList,"trg")})"
+        }
+        tempCondition
       }
       logger.info("join condition = {}",joinCondition)
       val updateSetClause = if (updateColumn.nonEmpty) {
