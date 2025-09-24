@@ -249,13 +249,10 @@ class TransformFw(override val schemaName: String,
 //          }
 //        }
 //      }
-    } else if (partitionsKeys.size > 1) {
-      // if not specify any partition condition, and has more than 1 partition level: ignore since the second partition level
-      ignorePartition = partitionsKeys(1).name
     }
-    if (ignorePartition != null) {
-      existsPartitionList = existsPartitionList.map(p => p.slice(0, p.indexOf(ignorePartition) - 1)).distinct
-    }
+//    if (ignorePartition != null) {
+//      existsPartitionList = existsPartitionList.map(p => p.slice(0, p.indexOf(ignorePartition) - 1)).distinct
+//    }
 
     existsPartitionList = existsPartitionList.filter(existsPart => {
       isPartitionInCondition(existsPart, ptConditionsGroup, partitionsKeys)
