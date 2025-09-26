@@ -72,9 +72,11 @@ object DataValidator {
       val sb = new StringBuilder()
       var count = 0
       for (partitionToDelete <- deletePartitions) {
-        sb.append(f" (${convertToDeleteCondition(partitionToDelete,alias)})")
-        if (count < deletePartitions.size - 1) {
-          sb.append(" OR ")
+        if(!partitionToDelete.equals("ictrl_dt")) {
+          sb.append(f" (${convertToDeleteCondition(partitionToDelete, alias)})")
+          if (count < deletePartitions.size - 1) {
+            sb.append(" OR ")
+          }
         }
         count += 1
       }
