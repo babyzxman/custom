@@ -67,16 +67,14 @@ object DataValidator {
     }.mkString(" AND ")
   }
 
-  def generateWhereConditionFromDeletePartition(deletePartitions: List[String],alias: String): String = {
+  def generateWhereConditionFromDeletePartition(deletePartitions: List[PartitionCondition],alias: String): String = {
     if(deletePartitions.nonEmpty) {
       val sb = new StringBuilder()
       var count = 0
       for (partitionToDelete <- deletePartitions) {
-        if(!partitionToDelete.equals("ictrl_dt")) {
-          sb.append(f" (${convertToDeleteCondition(partitionToDelete, alias)})")
-          if (count < deletePartitions.size - 1) {
-            sb.append(" OR ")
-          }
+        sb.append(f"($alias.${partitionToDelete.getName} ${PartitionParsers.convertComparatorToSymbol(partitionToDelete.getComparator)} '${partitionToDelete.getValue}')")
+        if (count < deletePartitions.size - 1) {
+          sb.append(" AND ")
         }
         count += 1
       }
@@ -283,7 +281,8 @@ object DataValidator {
                          connectionInfo: ConnectionInfo,spark:SparkSession,tmpz:String,
                          updateColumn: List[String] = List.empty,
                          whereCondition: String,path: String,
-                         dropPartitionList: List[String]): Unit = {
+                         dropPartitionList: List[String],
+                         partitionConditionList: List[PartitionCondition]): Unit = {
     // Rewrite of `check_table_type`
     def checkTableType(targetTableNm: String): String = {
       val queryTableType = s"""
@@ -309,7 +308,7 @@ object DataValidator {
     // Rewrite of `upsert_condition`
     def upsertCondition(tmpValidationDF: DataFrame, targetTblName: String, uniqueKey: String, mergeCondition: Option[String],
                         updateColumn: List[String],spark: SparkSession,
-                        dropPartitionList: List[String]): Unit = {
+                        partitionConditionList: List[PartitionCondition]): Unit = {
       val deltaTable = DeltaTable.forName(spark, targetTblName)
       var uniqueKeyList : List[String] = List.empty
       if(uniqueKey != null) {
@@ -321,15 +320,15 @@ object DataValidator {
       val joinCondition = uniqueKeyList.map(key => s"trg.$key = src.$key").mkString(" AND ")
       val fullMergeCondition = if(mergeCond != null) {
         var tempCondition = s"$joinCondition AND $mergeCond"
-        if(dropPartitionList.nonEmpty) {
-          tempCondition = tempCondition + s" AND (${generateWhereConditionFromDeletePartition(dropPartitionList,"trg")})"
+        if(partitionConditionList.nonEmpty) {
+          tempCondition = tempCondition + s" AND (${generateWhereConditionFromDeletePartition(partitionConditionList,"trg")})"
         }
         tempCondition
       }
       else {
         var tempCondition = s"$joinCondition"
-        if(dropPartitionList.nonEmpty) {
-          tempCondition = tempCondition + s" AND (${generateWhereConditionFromDeletePartition(dropPartitionList,"trg")})"
+        if(partitionConditionList.nonEmpty) {
+          tempCondition = tempCondition + s" AND (${generateWhereConditionFromDeletePartition(partitionConditionList,"trg")})"
         }
         tempCondition
       }
@@ -429,7 +428,7 @@ object DataValidator {
           mergeCondition = updateCondition,
           updateColumn = updateColumn,
           spark,
-          dropPartitionList
+          partitionConditionList
         )
 
       case "update" =>

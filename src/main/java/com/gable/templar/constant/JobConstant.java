@@ -23,7 +23,8 @@ public class JobConstant {
         VAR_RFZDTB("rfzdtb","VAR_RFZDTB"),
         VAR_TMPOUTZ("tmpoutz","VAR_TMPOUTZ"),
         VAR_FWCONFZ("fwconfz",
-                "VAR_FWCONFZ");
+                "VAR_FWCONFZ"),
+        VAR_RFZSALE("rfzsale","VAR_RFZSALE");
 
         private String schemaName;
 

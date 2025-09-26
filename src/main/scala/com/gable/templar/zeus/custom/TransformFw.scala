@@ -687,8 +687,8 @@ class TransformFw(override val schemaName: String,
                       getAs[String]("unique_key"),
                     Some(controlJobDf.getAs[String]("update_condition")),
                     jobName, connectionInfo, sparkSession, tmpzSchema,updateCondition,
-                    whereCondition,location.toString,dropPartitionList)
-                  println("drop partition list = {}",dropPartitionList)
+                    whereCondition,location.toString,dropPartitionList,partitionConditionList)
+                  logger.info("drop partition list = {}",dropPartitionList)
                   if(isDeltaTable) {
                     sparkSession.sql(s"delete from ${tmpzSchema}.${tableName}_tmp_validation ${DataValidator.generateWhereConditionFromPartitionCondition(partitionConditionList)}")
                   }
