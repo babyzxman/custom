@@ -423,7 +423,7 @@ class IngestFw(override val schemaName: String,
           val totalRetry = controlJobDf.getAs[Int]("total_retry")
           val schemaNameFromTbl = controlJobDf.getAs[String]("target_schema_nm")
           var currentDateRun = controlJobDf.getAs[String]("last_success_ictrl_dt")
-          val lastSuccessIctrlDt = currentDateRun
+          val lastSuccessIctrlDt = controlJobDf.getAs[String]("last_success_ictrl_dt")
           var processJobType: String = "ongoing"
 //          val isSkipCatchUp = (controlJobDf.getAs[String]("ignore_catchup") != null &&
 //            controlJobDf.getAs[String]("ignore_catchup") == "Y")
@@ -602,7 +602,7 @@ class IngestFw(override val schemaName: String,
                   param.put("manual_ref_date", objectMapper.valueToTree("False"))
                 else
                   param.put("manual_ref_date",objectMapper.valueToTree("True"))
-                param.put("last_success_ictrl_dt",objectMapper.valueToTree(currentDateRun))
+                param.put("last_success_ictrl_dt",objectMapper.valueToTree(lastSuccessIctrlDt))
                 param.put("dag_run_id", objectMapper.valueToTree(runId))
                 if (dependencyCheckModel.getTaskGroupName != null)
                   param.put("job_run_mode", objectMapper.valueToTree("tasksgroup"))
