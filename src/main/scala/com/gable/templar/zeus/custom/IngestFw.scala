@@ -423,7 +423,7 @@ class IngestFw(override val schemaName: String,
           val totalRetry = controlJobDf.getAs[Int]("total_retry")
           val schemaNameFromTbl = controlJobDf.getAs[String]("target_schema_nm")
           var currentDateRun = controlJobDf.getAs[String]("last_success_ictrl_dt")
-          val lastSuccessIctrlDt = controlJobDf.getAs[String]("last_success_ictrl_dt")
+          var lastSuccessIctrlDt = controlJobDf.getAs[String]("last_success_ictrl_dt")
           var processJobType: String = "ongoing"
 //          val isSkipCatchUp = (controlJobDf.getAs[String]("ignore_catchup") != null &&
 //            controlJobDf.getAs[String]("ignore_catchup") == "Y")
@@ -452,6 +452,7 @@ class IngestFw(override val schemaName: String,
             currentLocalDateRun = masterRefDate
             logger.info("current local date run init = {}",currentDateRun)
             currentDateRun = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
+            lastSuccessIctrlDt = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
           }
           else {
             currentLocalDateRun = parseToLocalDateTime(currentDateRun, dateFormatIctrlDtForTb).get
