@@ -89,7 +89,7 @@ object DataValidator {
       sb.append("WHERE ")
       var count = 0
       partitionConditionList.foreach(f => {
-        sb.append(f" ${f.getName} ${PartitionParsers.convertComparatorToSymbol(f.getComparator)} ${f.getValue}")
+        sb.append(f" ${f.getName} ${PartitionParsers.convertComparatorToSymbol(f.getComparator)} '${f.getValue}'")
         if (count < partitionConditionList.size - 1) {
           sb.append(" AND ")
         }

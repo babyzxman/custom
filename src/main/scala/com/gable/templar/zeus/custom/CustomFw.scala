@@ -462,6 +462,7 @@ trait CustomFw {
         case e: HttpServerErrorException.BadGateway =>
           logger.error(e.getMessage,e)
           attempt += 1
+          Thread.sleep(5000)
           if(attempt >= RETRY_COUNT) {
             throw e
           }
