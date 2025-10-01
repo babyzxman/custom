@@ -1132,8 +1132,13 @@ class TransformFw(override val schemaName: String,
           case "month_to_date" =>
             val dateRun = masterRefDate
             val dateStart = dateRun.withDayOfMonth(1)
-            var dateEnd = dateRun.withDayOfMonth(valuesInt)
-
+            var dateEnd: LocalDateTime = null
+            if(valuesInt == 31) {
+              dateEnd = dateRun.withDayOfMonth(dateRun.toLocalDate.lengthOfMonth())
+            }
+            else {
+              dateEnd = dateRun.withDayOfMonth(valuesInt)
+            }
             if (frequency == "monthly" && Try(backDate.toString.toInt).getOrElse(0) == 0) {
               dateEnd = dateEnd.minusDays(1)
             }
