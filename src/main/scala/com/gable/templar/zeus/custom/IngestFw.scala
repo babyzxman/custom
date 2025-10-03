@@ -425,8 +425,8 @@ class IngestFw(override val schemaName: String,
           var currentDateRun = controlJobDf.getAs[String]("last_success_ictrl_dt")
           var lastSuccessIctrlDt = controlJobDf.getAs[String]("last_success_ictrl_dt")
           var processJobType: String = "ongoing"
-//          val isSkipCatchUp = (controlJobDf.getAs[String]("ignore_catchup") != null &&
-//            controlJobDf.getAs[String]("ignore_catchup") == "Y")
+          val isSkipCatchUp = (controlJobDf.getAs[String]("ignore_catchup") != null &&
+            controlJobDf.getAs[String]("ignore_catchup") == "Y")
           var origRefDate: LocalDateTime = null
           if (dependencyCheckModel.getFixedDate == null || dependencyCheckModel.getFixedDate.isEmpty) {
             masterRefDate = minusDateByFrequency(
@@ -448,7 +448,7 @@ class IngestFw(override val schemaName: String,
             origRefDate = tempDateTime
             processJobType = "manual"
           }
-          if (currentDateRun == null || loadType.equals(LOAD_TYPE.FULL_LOAD.getValue)) {
+          if (currentDateRun == null || loadType.equals(LOAD_TYPE.FULL_LOAD.getValue) || isSkipCatchUp) {
             currentLocalDateRun = masterRefDate
             logger.info("current local date run init = {}",currentDateRun)
             currentDateRun = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
@@ -496,11 +496,15 @@ class IngestFw(override val schemaName: String,
           val postgresConnectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql, salt, ultKey)
           val executeResponse: ExecuteResponse = new ExecuteResponse
           executeResponse.setJobName(jobName)
+          val pattern = "^(.*?)__".r
+          val modifiedDagRun = s"${pattern.findFirstMatchIn(
+            dependencyCheckModel.get_runId()).map(_.group(1)).getOrElse("")}__${dependencyCheckModel.
+            get_bldEndDate().toLocalDateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd hh:mm:ss"))}"
           breakable {
             while (isContinueRunning) {
               var runId = ""
               if (dependencyCheckModel.get_workflowId() != null) {
-                runId = dependencyCheckModel.get_workflowId() + "|" + dependencyCheckModel.get_runId() + "|" + dependencyCheckModel.get_taskId()
+                runId = dependencyCheckModel.get_workflowId() + "|" + modifiedDagRun + "|" + dependencyCheckModel.get_taskId()
               }
               else {
                 runId = "manual_run_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HH_mm_ss"))

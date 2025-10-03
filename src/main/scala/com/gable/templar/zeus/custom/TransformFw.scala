@@ -205,7 +205,7 @@ class TransformFw(override val schemaName: String,
     updateJobStartTimeOfAuditLogByJobNameAndRoundTimeAndDagRun(
       jobName,jobStartTime,roundTime,runId,
       "tbl_ingest_audit_logs",connectionInfo,refDateIctrlDt)
-    doRunNotebookParallel(param,
+    doRunNotebookParallelRunWithName(param,
         controlJobDf.getAs[String]("script_path").trim, dependencyCheckModel,
         username, runId,httpServletRequest)
   }
@@ -467,7 +467,9 @@ class TransformFw(override val schemaName: String,
           }
           processJobType = "manual"
         }
-        if(currentDateRun == null || LOAD_TYPE.FULL_LOAD.getValue.equals(loadType)) {
+        val isSkipCatchUp = (controlJobDf.getAs[String]("ignore_catchup") != null &&
+          controlJobDf.getAs[String]("ignore_catchup") == "Y")
+        if(currentDateRun == null || LOAD_TYPE.FULL_LOAD.getValue.equals(loadType) || isSkipCatchUp) {
           currentLocalDateRun = masterRefDate
           currentDateRun = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
         }
@@ -483,13 +485,18 @@ class TransformFw(override val schemaName: String,
         var isContinueRunning: Boolean = true
         var ictrlDtRun: LocalDateTime = null
         val executeResponse: ExecuteResponse = new ExecuteResponse
+        val pattern = "^(.*?)__".r
+        val modifiedDagRun = s"${pattern.findFirstMatchIn(
+          dependencyCheckModel.get_runId()).map(_.group(1)).getOrElse("")}__${dependencyCheckModel.
+          get_bldEndDate().toLocalDateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd hh:mm:ss"))}"
         executeResponse.setJobName(jobName)
         breakable {
           while (isContinueRunning) {
             var runId = ""
             var endIctrlDt: String = ""
             if (dependencyCheckModel.get_workflowId() != null) {
-              runId = dependencyCheckModel.get_workflowId() + "|" + dependencyCheckModel.get_runId() + "|" + dependencyCheckModel.get_taskId()
+              runId = dependencyCheckModel.get_workflowId() + "|" + modifiedDagRun +
+                "|" + dependencyCheckModel.get_taskId()
             }
             else {
               runId = "manual_run_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HH_mm_ss"))

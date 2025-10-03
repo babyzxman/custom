@@ -478,6 +478,88 @@ trait CustomFw {
     runNotebookParallelResult
   }
 
+  def doRunNotebookParallelRunWithName(param: java.util.HashMap[String, JsonNode], notebookname: String,
+                            dependencyCheckModel: DependencyCheckModel, username: String,
+                            runId: String, httpServletRequest: HttpServletRequest): RunNotebookParallelResult = {
+    val runNotebookParallelResult = new RunNotebookParallelResult
+    param.put("dag_run_id", objectMapper.valueToTree(runId))
+    val token = HTTPServletRequestUtil.getToken(httpServletRequest)
+    val notebookRunParallelRequest = new NotebookRunParallelRequest
+    notebookRunParallelRequest.setRunBy(username)
+    notebookRunParallelRequest.setAsync(true)
+    notebookRunParallelRequest.setRunningId(runId)
+    notebookRunParallelRequest.setLanguage("python")
+    notebookRunParallelRequest.setModuleNotebookName(dependencyCheckModel.getModuleNotebookName)
+    val notebookIdAddParameterRequest: NotebookIdAddParameterRequest = new NotebookIdAddParameterRequest
+    val addParameterRequest: java.util.Map[String, java.util.Map[String, JsonNode]] = new java.util.HashMap[String, java.util.Map[String, JsonNode]]()
+    addParameterRequest.put(initialTitle, param)
+    addParameterRequest.put(manualTitle, param)
+    addParameterRequest.put(importParameter,param)
+    notebookIdAddParameterRequest.setNotebookName(notebookname)
+    notebookIdAddParameterRequest.setAddParameterMapFromTitle(addParameterRequest)
+    notebookIdAddParameterRequest.setSparkConf(dependencyCheckModel.getSparkConf)
+    val notebookIdAddParameterRequestList: java.util.ArrayList[NotebookIdAddParameterRequest] = new util.ArrayList[NotebookIdAddParameterRequest]()
+    notebookIdAddParameterRequestList.add(notebookIdAddParameterRequest)
+    notebookRunParallelRequest.setNotebookAddParameterRequest(notebookIdAddParameterRequestList)
+    logger.info(f"request  = ${objectMapper.writeValueAsString(notebookRunParallelRequest)}")
+    val response = RestTemplateFactoryUtil.getRestTemplar(token, true).postForObject(f"$heraUrl/private/notebook/start/session/parallel", notebookRunParallelRequest, classOf[NotebookRunParallelResponse])
+    val notebookList = response.getNotebookRefIds
+    logger.info(f"request parallel result = ${objectMapper.writeValueAsString(response)}")
+    val notebookCheckParallelRequest = new NotebookCheckParallelRequest
+    notebookCheckParallelRequest.setRunningId(runId)
+    val returnResponse: StringBuilder = new StringBuilder()
+    notebookCheckParallelRequest.setNoteRefIds(notebookList)
+    var errorCount = 0
+    var notebookUrl = ""
+    var timeSleep: Long = 0L
+    if (dependencyCheckModel.getTimeSleep == null) {
+      timeSleep = 30L
+    }
+    else {
+      timeSleep = dependencyCheckModel.getTimeSleep
+      if(timeSleep < 30L) {
+        timeSleep = 30L
+      }
+    }
+    var attempt = 0
+    while (!notebookList.isEmpty) {
+      Thread.sleep(timeSleep * 1000)
+      try {
+        val response = RestTemplateFactoryUtil.getRestTemplar(token, true).postForObject(f"$heraUrl/private/notebook/session/parallel/check", notebookCheckParallelRequest, classOf[java.util.HashMap[String, java.util.HashMap[String, String]]])
+        response.entrySet().forEach(r => {
+          logger.info("r value = {}", r.getValue)
+          if (!r.getValue.get("status").equals("RUNNING") && !r.getValue.get("status").equals("READY")) {
+            returnResponse.append(f"note name = ${r.getKey} run ${r.getValue.get("status")} url = ${r.getValue.get("url")} result = ${r.getValue.get("message")} ${System.lineSeparator()}")
+            if (!r.getValue.get("status").equals("SUCCESS")) {
+              errorCount += 1
+            }
+            if (r.getValue.get("url") != null) {
+              notebookUrl = r.getValue.get("url")
+            }
+            notebookList.remove(r.getValue.get("notebookIdRef"))
+          }
+        })
+      }
+      catch {
+        case e: HttpServerErrorException.BadGateway =>
+          logger.error(e.getMessage,e)
+          attempt += 1
+          Thread.sleep(5000)
+          if(attempt >= RETRY_COUNT) {
+            throw e
+          }
+      }
+    }
+    if (errorCount > 0) {
+      returnResponse.append("There is error on some notebook")
+      runNotebookParallelResult.setErrorMsg(returnResponse.toString())
+      runNotebookParallelResult.setErrorSpecificMsg(f"There is error on some notebook url = $notebookUrl")
+    }
+    runNotebookParallelResult.setNotebookUrl(notebookUrl)
+    runNotebookParallelResult.setMessage(returnResponse.toString())
+    runNotebookParallelResult
+  }
+
   def calOverLap(dateIn: LocalDateTime, valueOverlap: Any, frequency: String): LocalDateTime = {
     var freq = frequency
     if (freq == null || freq.isEmpty) {
