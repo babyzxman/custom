@@ -8,6 +8,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.slf4j.LoggerFactory
 
 import java.sql.{Connection, DriverManager, PreparedStatement, ResultSet}
+import scala.collection.mutable
 
 object ConnectionService {
 
@@ -109,6 +110,31 @@ object ConnectionService {
     } finally {
       statement.close()
       connection.close()
+    }
+  }
+
+  def getGlobalParams(server: String,
+                      port: String, // Include port in function signature as per Python, use in URL
+                      dbName: String, // Renamed from db_name for Scala convention
+                      username: String,
+                      password: String,
+                      query: String): mutable.Map[String,String] = {
+    val url = s"jdbc:postgresql://$server:$port/$dbName"
+    logger.info("Executing query: {}", query)
+    val globalParamMap: mutable.Map[String,String] = mutable.Map.empty
+    val connection = DriverManager.getConnection(url, username, password)
+    val statement = connection.prepareStatement(query)
+    try{
+      val rs = statement.executeQuery(query)
+      while(rs.next()) {
+        if(rs.getString("active_flag") != null && rs.getString("active_flag") == "Y")
+          globalParamMap.put(rs.getString("key"),rs.getString("value"))
+      }
+      globalParamMap
+    }
+    finally {
+      connection.close()
+      statement.close()
     }
   }
 

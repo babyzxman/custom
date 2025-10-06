@@ -198,7 +198,11 @@ class TransformFw(override val schemaName: String,
     param.put("back_date", objectMapper.valueToTree(0))
     param.put("job_name", objectMapper.valueToTree(jobName))
     param.put("spec_arg", objectMapper.valueToTree(specArg))
-    for(schemaEntry <- schemaMap.entrySet()) {
+    val globalParamMap = ConnectionService.getGlobalParams(
+      connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
+      connectionInfo.getUserNm,connectionInfo.getPassword,
+      s"select * from $schemaName.tbl_global_params where system = 'schema'")
+    for(schemaEntry <- globalParamMap.entrySet()) {
       param.put(schemaEntry.getKey,objectMapper.valueToTree(schemaEntry.getValue))
     }
     val jobStartTime: LocalDateTime = LocalDateTime.now()
@@ -448,6 +452,12 @@ class TransformFw(override val schemaName: String,
         val timeRetry = controlJobDf.getAs[Int]("time_retry")
         val totalRetry = controlJobDf.getAs[Int]("total_retry")
         var currentDateRun = controlJobDf.getAs[String]("last_success_ictrl_dt")
+        val scheduleCutOff = if(controlJobDf.getAs[String]("time_cutoff") != null) {
+          LocalTime.parse(controlJobDf.getAs[String]("time_cutoff"),DateTimeFormatter.ofPattern("HH:mm"))
+        }
+        else {
+          null
+        }
         val lastSuccessIctrlDt = currentDateRun
         val queryMasterSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = 'fw_postgre'"
         val connectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql,salt,ultKey)
@@ -546,6 +556,11 @@ class TransformFw(override val schemaName: String,
                     readyJob.add(result.getKey)
                   }
                   if (hasNotReadyJob) {
+                    if(scheduleCutOff != null) {
+                      if(LocalTime.now().isAfter(scheduleCutOff)) {
+                        throw new InvalidArgumentException("The time retry is more than schedule cutoff time")
+                      }
+                    }
                     if (i == totalRetry - 1)
                       throw new InvalidArgumentException("The dependency job check failed because this job = " + String.join(",", notReadyJob) + " is not finished")
                   }
@@ -1059,7 +1074,8 @@ class TransformFw(override val schemaName: String,
           (false, Map(prerequisiteJobNm -> listDateTarget))
         }
 
-      case "quarter" | "month_to_date" | "hour_to_date" | "daily_period" | "year_to_date" | "current_quarter" | "start_to_eom" =>
+      case "quarter" | "month_to_date" | "hour_to_date" | "daily_period" | "year_to_date" | "current_quarter" | "start_to_eom" |
+           "start_year_to_current" | "start_month_to_current" =>
         val queryDictMultiDay = Map(
           "tbl_ingest_audit_logs" -> s"SELECT target_table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblIngestAuditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND target_schema_nm = '{{prerequisite_schema}}' AND target_table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC",
           "tbl_trans_audit_logs" -> s"SELECT table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblTauditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND schema_nm = '{{prerequisite_schema}}' AND table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC"
@@ -1081,6 +1097,40 @@ class TransformFw(override val schemaName: String,
             val useBetweenQuery = checkOrderDatetimeFormat(patternIctrlDateCheck)
             if (useBetweenQuery) {
               targetDateQueryPart = s"BETWEEN '${startMonth.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}' AND '${endMonth.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}'"
+            } else {
+              targetDateQueryPart = s"IN (${listDateTarget.map(d => s"'$d'").mkString(", ")})"
+            }
+          case "start_year_to_current" =>
+            val startYear = masterRefDate.withMonth(1).withDayOfMonth(1).withHour(0)
+            val endRange = masterRefDate
+            val format = DateTimeFormatter.ofPattern(patternIctrlDateCheck)
+            var startYearTemp = startYear
+            while(!startYearTemp.isAfter(endRange)) {
+              listDateTarget = listDateTarget :+ startYearTemp.format(format)
+              startYearTemp = addDateByFrequency(startYearTemp,frequency)
+            }
+            listDateTarget = listDateTarget.distinct // Drop duplicates
+
+            val useBetweenQuery = checkOrderDatetimeFormat(patternIctrlDateCheck)
+            if (useBetweenQuery) {
+              targetDateQueryPart = s"BETWEEN '${startYear.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}' AND '${endRange.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}'"
+            } else {
+              targetDateQueryPart = s"IN (${listDateTarget.map(d => s"'$d'").mkString(", ")})"
+            }
+          case "start_month_to_current" =>
+            val startMonth = masterRefDate.withDayOfMonth(1)
+            val currentMonth = masterRefDate
+            val format = DateTimeFormatter.ofPattern(patternIctrlDateCheck)
+            var startMonthTemp = startMonth
+            while(!startMonthTemp.isAfter(currentMonth)) {
+              listDateTarget = listDateTarget :+ startMonthTemp.format(format)
+              startMonthTemp = addDateByFrequency(startMonthTemp,frequency)
+            }
+            listDateTarget = listDateTarget.distinct // Drop duplicates
+
+            val useBetweenQuery = checkOrderDatetimeFormat(patternIctrlDateCheck)
+            if (useBetweenQuery) {
+              targetDateQueryPart = s"BETWEEN '${startMonth.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}' AND '${currentMonth.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}'"
             } else {
               targetDateQueryPart = s"IN (${listDateTarget.map(d => s"'$d'").mkString(", ")})"
             }
