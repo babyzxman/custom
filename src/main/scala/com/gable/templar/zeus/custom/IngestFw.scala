@@ -3,7 +3,7 @@ package com.gable.templar.zeus.custom
 import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import com.gable.templar.constant.JobConstant
 import com.gable.templar.constant.JobConstant.{CATCHUP_TYPE, LOAD_TYPE}
-import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse, RunNotebookParallelResult}
+import com.gable.templar.custom.view.{DependencyCheckModel, DependencyCheckResult, ExecuteResponse, RunNotebookParallelResult}
 import com.gable.templar.exception.{DropDuplicatesJobError, DropSuccessJobError, RunNotebookParallelException}
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.zeus.controller.model.LoginUser
@@ -549,22 +549,38 @@ class IngestFw(override val schemaName: String,
                 val connectionInfo = ConnectionService.getMasterConfigLog(queryMasterSourceSql, salt, ultKey)
                 breakable {
                   for (i <- 0 to totalRetry) {
-                    val results: java.util.Map[String, Boolean] =
+                    val results: java.util.Map[String, DependencyCheckResult] =
                       checkDependencyByJobName(controlJobDf, ictrlDtRun, postgresConnectionInfo,
                         refDateIctrlDt, currentDateRun, connectionInfo, jobName,null)
                     val notReadyJob: java.util.Set[String] = new java.util.HashSet[String]
+                    val notReadyTableSchema: java.util.Set[String] = new java.util.HashSet[String]
                     val readyJob: java.util.Set[String] = new java.util.HashSet[String]
                     var hasNotReadyJob: Boolean = false
                     for (result <- results.entrySet) {
-                      if (!result.getValue) {
-                        notReadyJob.add(result.getKey)
+                      if (!result.getValue.getResult) {
+                        if(result.getValue.getJobName != null)
+                          notReadyJob.add(result.getKey)
+                        else
+                          notReadyTableSchema.add(result.getValue.getTableName)
                         hasNotReadyJob = true
                       }
                       readyJob.add(result.getKey)
                     }
                     if (hasNotReadyJob) {
-                      if (i == totalRetry - 1)
-                        throw new InvalidArgumentException("The dependency job check failed because this job = " + String.join(",", notReadyJob) + " is not finished")
+                      if (i == totalRetry - 1) {
+                        val throwSb: StringBuilder = new StringBuilder()
+                        throwSb.append("The dependency job check failed because ")
+                        if(notReadyJob.nonEmpty) {
+                          throwSb.append(" this job = ").append(String.join(",", notReadyJob)).append(" is not finished")
+                        }
+                        if(notReadyTableSchema.nonEmpty) {
+                          if(notReadyJob.nonEmpty) {
+                            throwSb.append(" and")
+                          }
+                          throwSb.append(" this table = ").append(String.join(",", notReadyTableSchema)).append(" is not finished")
+                        }
+                        throw new InvalidArgumentException(throwSb.toString())
+                      }
                     }
                     else {
                       break()
@@ -1219,17 +1235,17 @@ class IngestFw(override val schemaName: String,
     }
   }
 
-  override def checkDependencyByJobName(controlJobDf: Row,
+  def checkDependencyByJobName(controlJobDf: Row,
                                         masterRefDate: LocalDateTime,postgresConnectionInfo: ConnectionInfo,
                                         refDateIctrlDt: String, startICtrlDt: String,
                                         connectionInfo: ConnectionInfo,jobName:String,
-                                        schemaMap: mutable.Map[String,String]): java.util.Map[String,Boolean] = {
+                                        schemaMap: mutable.Map[String,String]): java.util.Map[String,DependencyCheckResult] = {
     var df = ConnectionService.postgresqlQueryDirectly(
       postgresConnectionInfo.getIp,postgresConnectionInfo.getPort,
       postgresConnectionInfo.getDbName,postgresConnectionInfo.getUserNm,postgresConnectionInfo.getPassword
       ,s"select * from $schemaName.tbl_job_dependency where " +
       s"job_nm = '$jobName' and UPPER(active_flag) = 'Y'")
-    val returnJobMap = new java.util.HashMap[String,Boolean]()
+    val returnJobMap = new java.util.HashMap[String,DependencyCheckResult]()
     val processResult = processResultSetWithSingleLoop(df.rs)
     df.close()
     if(processResult._1) {
@@ -1243,7 +1259,17 @@ class IngestFw(override val schemaName: String,
         masterRefDate, "tbl_ingest_logs", connectionInfo.getIp, connectionInfo.getPort,
         connectionInfo.getUserNm, connectionInfo.getPassword, connectionInfo.getSid,
         postgresConnectionInfo)
-      returnJobMap.put(r.prerequisiteJobNm, map._1)
+      val dependencyCheckResult = new DependencyCheckResult
+      dependencyCheckResult.setJobName(r.prerequisiteJobNm)
+      dependencyCheckResult.setResult(map._1)
+      dependencyCheckResult.setTableName(preReqSchemaNm + "." + r.prerequisiteTableNm)
+      dependencyCheckResult.setSchemaName(r.prerequisiteSchemaNm)
+      if(dependencyCheckResult.getJobName != null) {
+        returnJobMap.put(dependencyCheckResult.getJobName, dependencyCheckResult)
+      }
+      else {
+        returnJobMap.put(dependencyCheckResult.getTableName, dependencyCheckResult)
+      }
     }
     else {
       df = ConnectionService.postgresqlQueryDirectly(
@@ -1263,7 +1289,18 @@ class IngestFw(override val schemaName: String,
             masterRefDate, "tbl_ingest_logs", connectionInfo.getIp,
             connectionInfo.getPort, connectionInfo.getUserNm, connectionInfo.getPassword,
             connectionInfo.getSid, postgresConnectionInfo)
-          returnJobMap.put(r.getString("prerequisite_job_nm"), map._1)
+          val dependencyCheckResult = new DependencyCheckResult
+          dependencyCheckResult.setJobName(r.getString("prerequisite_job_nm"))
+          dependencyCheckResult.setResult(map._1)
+          dependencyCheckResult.setTableName(
+            preReqSchemaNm+ "." + r.getString("prerequisite_table_nm"))
+          dependencyCheckResult.setSchemaName(preReqSchemaNm)
+          if(dependencyCheckResult.getJobName != null) {
+            returnJobMap.put(dependencyCheckResult.getJobName, dependencyCheckResult)
+          }
+          else {
+            returnJobMap.put(dependencyCheckResult.getTableName, dependencyCheckResult)
+          }
         }
       }
       finally {

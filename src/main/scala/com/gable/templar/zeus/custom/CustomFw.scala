@@ -78,12 +78,6 @@ trait CustomFw {
                      tblConfName: String, httpServletRequest: HttpServletRequest,
                      username: String,roundTime: LocalDateTime): CompletableFuture[ExecuteResponse]
 
-  def checkDependencyByJobName(controlJobDf: Row,
-                               masterRefDate: LocalDateTime, connectionInfo: ConnectionInfo,
-                               refDateIctrlDt: String, startICtrlDt: String,
-                               postgresConnectionInfo: ConnectionInfo, jobName: String,
-                               schemaMap:mutable.Map[String,String]): java.util.Map[String, Boolean]
-
   def truncateToFormat(ldt: LocalDateTime, format: String): LocalDateTime = {
     format match {
       case "yyyyMM"       => ldt.withDayOfMonth(1).toLocalDate.atStartOfDay()
