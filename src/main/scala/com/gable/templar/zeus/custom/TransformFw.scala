@@ -417,7 +417,7 @@ class TransformFw(override val schemaName: String,
           dependencyCheckModel.setModuleNotebookName("zeppelin-se-uat-g")
         var masterRefDate: LocalDateTime = null
         var processJobType: String = "ongoing"
-        val frequency = controlJobDf.getAs[String]("frequency")
+        var frequency = controlJobDf.getAs[String]("frequency")
         val backdate = controlJobDf.getAs[Any]("back_day")
         var currentLocalDateRun: LocalDateTime = null
         var catchUpType = controlJobDf.getAs[String]("catchup_type")
@@ -461,10 +461,10 @@ class TransformFw(override val schemaName: String,
         val lastSuccessIctrlDt = currentDateRun
         val queryMasterSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = 'fw_postgre'"
         val connectionInfo = ConnectionService.getMasterConfigLog(queryMasterSql,salt,ultKey)
+        val isFrequencyAccordToFmt = checkFrequencyAndTgtFmt(frequency,dateFormatIctrlDtForTb)
         if(dependencyCheckModel.getFixedDate == null || dependencyCheckModel.getFixedDate.isEmpty) {
           masterRefDate = minusDateByFrequency(
-            truncateToFormat(dependencyCheckModel.get_bldEndDate().
-              toLocalDateTime,dateFormatIctrlDtForTb),frequency,backdate)
+            dependencyCheckModel.get_bldEndDate().toLocalDateTime,frequency,backdate)
         }
         else {
           try{
@@ -499,6 +499,9 @@ class TransformFw(override val schemaName: String,
         val modifiedDagRun = s"${pattern.findFirstMatchIn(
           dependencyCheckModel.get_runId()).map(_.group(1)).getOrElse("")}__${dependencyCheckModel.
           get_bldEndDate().toLocalDateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd hh:mm:ss"))}"
+        if(isFrequencyAccordToFmt) {
+          frequency = checkFrequencyAndChangeFrequencyToCorrectFrequency(frequency, dateFormatIctrlDtForTb)
+        }
         executeResponse.setJobName(jobName)
         breakable {
           while (isContinueRunning) {
@@ -858,11 +861,16 @@ class TransformFw(override val schemaName: String,
       breakable {
         while (dfResultLog.rs.next()) {
           val lastRoundTimeWIctrlDt = dfResultLog.rs.getTimestamp("job_start_time")
-          val strFormatRoundTime = new java.text.SimpleDateFormat("yyyyMMdd").format(lastRoundTimeWIctrlDt)
-          val strRoundTimeIn = roundTime.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
-          if (strFormatRoundTime != strRoundTimeIn) {
-            logger.info("Check log Complete, current round_time is newer by 1 day than the last round_time.")
-            break()
+          if(lastRoundTimeWIctrlDt != null) {
+            val strFormatRoundTime = new java.text.SimpleDateFormat("yyyyMMdd").format(lastRoundTimeWIctrlDt)
+            val strRoundTimeIn = roundTime.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
+            if (strFormatRoundTime != strRoundTimeIn) {
+              logger.info("Check log Complete, current round_time is newer by 1 day than the last round_time.")
+              break()
+            }
+            else {
+              throw new InvalidArgumentException(s"DropDuplicatesJobError: $jobName")
+            }
           }
           else {
             throw new InvalidArgumentException(s"DropDuplicatesJobError: $jobName")

@@ -169,7 +169,7 @@ class IngestFw(override val schemaName: String,
                                  ictrlDtUpdate: String, roundTime: LocalDateTime, jobStartTimeUpdate: LocalDateTime,
                                  startIctrlDtStrUpdate: String, endIctrlDtStrUpdate: String, processJobType: String,
                                  cdrFlag: Boolean = false, dagRunId: String, appIdUpdate: String,
-                                 frequency: String, connectionInfo: ConnectionInfo, ictrlDtTgtFmt: String): Unit = {
+                                 isCorrectFrequency: Boolean, connectionInfo: ConnectionInfo): Unit = {
 
 
     println(s"Running time to check log: ${LocalDateTime.now()}")
@@ -206,39 +206,42 @@ class IngestFw(override val schemaName: String,
       breakable {
         while (dfResultLog.rs.next()) {
           val lastRoundTimeWIctrlDt = dfResultLog.rs.getTimestamp("job_start_time")
-
-          val strFormatRoundTime = new java.text.SimpleDateFormat("yyyyMMdd").format(lastRoundTimeWIctrlDt)
-          val strRoundTimeIn = roundTime.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
-          if (strFormatRoundTime != strRoundTimeIn) {
-            println("Check log Complete, current round_time is newer by 1 day than the last round_time.")
-            break()
-          } else {
-            val errMsg = s"Found Status RUNNING Job on ictrl_dt: $ictrlDtUpdate Running ON -> dag_run_id: ${dfResultLog.rs.getString("dag_run_id")} round_time: ${dfResultLog.rs.getTimestamp("round_time")}"
-            val errMsgUpdate = s"DropDuplicatesJobError: $errMsg"
-            println("-- Has Log Running in ingest audit log --")
-            println("Update Log Function")
-            val queryUpdateLog =
-              s"""
-        UPDATE $ingestAuditLogsTable
-        SET job_start_time = '$jobStartTimeUpdate',
-        ictrl_dt = '$ictrlDtUpdate',
-        start_ictrl_dt = '$startIctrlDtStrUpdate',
-        end_ictrl_dt = '$endIctrlDtStrUpdate',
-        status = 'FAILED',
-        job_end_time = '$jobStartTimeUpdate',
-        duration = '00:00:00',
-        source_cnt = 0,
-        process_cnt = 0,
-        row_cnt = 0,
-        err_msg = '$errMsgUpdate',
-        app_id = '$appIdUpdate'
-        WHERE job_nm = '$jobNmUpdate' AND tasksgroup_nm = '$tasksgroupNmUpdate' AND round_time = '$roundTime' AND dag_run_id = '$dagRunId'
-        """
-            ConnectionService.postgresqlInsertUpdateFunc(
-              connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
-              connectionInfo.getUserNm, connectionInfo.getPassword, queryUpdateLog, Seq.empty
-            )
-            println("Update audit log Complete")
+          val errMsg = s"Found Status RUNNING Job on ictrl_dt: $ictrlDtUpdate Running ON -> dag_run_id: ${dfResultLog.rs.getString("dag_run_id")} round_time: ${dfResultLog.rs.getTimestamp("round_time")}"
+          if(lastRoundTimeWIctrlDt != null) {
+            val strFormatRoundTime = new java.text.SimpleDateFormat("yyyyMMdd").format(lastRoundTimeWIctrlDt)
+            val strRoundTimeIn = roundTime.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
+            if (strFormatRoundTime != strRoundTimeIn) {
+              println("Check log Complete, current round_time is newer by 1 day than the last round_time.")
+              break()
+            } else {
+              val errMsgUpdate = s"DropDuplicatesJobError: $errMsg"
+              println("-- Has Log Running in ingest audit log --")
+              println("Update Log Function")
+              val queryUpdateLog =s"""
+                UPDATE $ingestAuditLogsTable
+                SET job_start_time = '$jobStartTimeUpdate',
+                ictrl_dt = '$ictrlDtUpdate',
+                start_ictrl_dt = '$startIctrlDtStrUpdate',
+                end_ictrl_dt = '$endIctrlDtStrUpdate',
+                status = 'FAILED',
+                job_end_time = '$jobStartTimeUpdate',
+                duration = '00:00:00',
+                source_cnt = 0,
+                process_cnt = 0,
+                row_cnt = 0,
+                err_msg = '$errMsgUpdate',
+                app_id = '$appIdUpdate'
+                WHERE job_nm = '$jobNmUpdate' AND tasksgroup_nm = '$tasksgroupNmUpdate' AND round_time = '$roundTime' AND dag_run_id = '$dagRunId'
+              """
+              ConnectionService.postgresqlInsertUpdateFunc(
+                connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+                connectionInfo.getUserNm, connectionInfo.getPassword, queryUpdateLog, Seq.empty
+              )
+              println("Update audit log Complete")
+              throw new DropDuplicatesJobError(errMsg)
+            }
+          }
+          else {
             throw new DropDuplicatesJobError(errMsg)
           }
         }
@@ -298,13 +301,13 @@ class IngestFw(override val schemaName: String,
     }
 
     // More Codition Check SUCCEED Log
-    if (processJobType == "ongoing" && !cdrFlag && checkFrequencyAndTgtFmt(frequency,ictrlDtTgtFmt)) {
+    if (processJobType == "ongoing" && !cdrFlag && isCorrectFrequency) {
       logger.info("test ongoing job logs")
       val queryIngLogSuccess =
         s"""
     SELECT job_nm, tasksgroup_nm, round_time, dag_run_id, target_schema_nm, target_table_nm, job_start_time, job_end_time, ictrl_dt, status
     FROM $ingestAuditLogsTable
-    WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroup_nm) = lower('$tasksgroupNmUpdate') AND ictrl_dt = '$ictrlDtUpdate' AND status = 'SUCCEED' AND err_msg = '-'
+    WHERE lower(job_nm) = lower('$jobNmUpdate') AND lower(tasksgroup_nm) = lower('$tasksgroupNmUpdate') AND ictrl_dt = '$ictrlDtUpdate' AND status = 'SUCCEED'
     ORDER BY round_time DESC
     LIMIT 1
     """
@@ -405,7 +408,7 @@ class IngestFw(override val schemaName: String,
           if (dependencyCheckModel.getModuleNotebookName == null)
             dependencyCheckModel.setModuleNotebookName("zeppelin-se-uat-g")
           var masterRefDate: LocalDateTime = null
-          val frequency = controlJobDf.getAs[String]("frequency")
+          var frequency = controlJobDf.getAs[String]("frequency")
           var backdate: Any = 0
           if(!JOB_TYPE.equals(JobConstant.JOB_TYPE.KAFKA))
             backdate = controlJobDf.getAs[Any]("back_day")
@@ -425,13 +428,13 @@ class IngestFw(override val schemaName: String,
           var currentDateRun = controlJobDf.getAs[String]("last_success_ictrl_dt")
           var lastSuccessIctrlDt = controlJobDf.getAs[String]("last_success_ictrl_dt")
           var processJobType: String = "ongoing"
-          val isSkipCatchUp = (controlJobDf.getAs[String]("ignore_catchup") != null &&
-            controlJobDf.getAs[String]("ignore_catchup") == "Y")
+          val ignoreCatchupType = controlJobDf.getAs[String]("catchup_type")
+          val isSkipCatchUp = ignoreCatchupType != null && ignoreCatchupType == "ignore_catchup"
           var origRefDate: LocalDateTime = null
           if (dependencyCheckModel.getFixedDate == null || dependencyCheckModel.getFixedDate.isEmpty) {
             masterRefDate = minusDateByFrequency(
-              truncateToFormat(dependencyCheckModel.get_bldEndDate().
-                toLocalDateTime,dateFormatIctrlDtForTb),frequency,backdate)
+              dependencyCheckModel.get_bldEndDate().toLocalDateTime,
+              frequency,backdate)
             origRefDate =  dependencyCheckModel.get_bldEndDate().toLocalDateTime
           }
           else {
@@ -444,10 +447,11 @@ class IngestFw(override val schemaName: String,
                 tempDateTime = parseToLocalDateTime(dependencyCheckModel.getFixedDate, dateFormatIctrlDtForTb).get
               }
             }
-            masterRefDate = truncateToFormat(tempDateTime,dateFormatIctrlDtForTb)
+            masterRefDate = tempDateTime
             origRefDate = tempDateTime
             processJobType = "manual"
           }
+          val isFrequencyAccordToFmt = checkFrequencyAndTgtFmt(frequency,dateFormatIctrlDtForTb)
           if (currentDateRun == null || loadType.equals(LOAD_TYPE.FULL_LOAD.getValue) || isSkipCatchUp) {
             currentLocalDateRun = masterRefDate
             logger.info("current local date run init = {}",currentDateRun)
@@ -472,6 +476,9 @@ class IngestFw(override val schemaName: String,
           }
           if (isCdr) {
             currentLocalDateRun = masterRefDate
+          }
+          if(isFrequencyAccordToFmt) {
+            frequency = checkFrequencyAndChangeFrequencyToCorrectFrequency(frequency, dateFormatIctrlDtForTb)
           }
           var startIctrlDt = currentLocalDateRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
           var startRefDate = currentLocalDateRun
@@ -542,8 +549,8 @@ class IngestFw(override val schemaName: String,
                 checkRunningIctrlDtIngest(jobName,
                   taskGroupName, refDateIctrlDt, roundTime, runTime, startDateWithOverlapIctrlDt,
                   refDateIctrlDt, processJobType, isCdr, runId,
-                  sparkSession.sparkContext.applicationId, frequency,
-                  postgresConnectionInfo,dateFormatIctrlDtForTb)
+                  sparkSession.sparkContext.applicationId,
+                  isFrequencyAccordToFmt, postgresConnectionInfo)
                 var startDetailTime: LocalDateTime = LocalDateTime.now()
                 val queryMasterSourceSql = s"SELECT system,key,values FROM $schemaName.tbl_master_config where system = 'core_dwh_TEDWHDPAPPB'"
                 val connectionInfo = ConnectionService.getMasterConfigLog(queryMasterSourceSql, salt, ultKey)
@@ -688,7 +695,8 @@ class IngestFw(override val schemaName: String,
                       roundTime,postgresConnectionInfo,exception.getMessage,
                       "tbl_ingest_audit_logs",jobName,refDateIctrlDt)
                   }
-                  throw new Exception(exception.getMessage)
+                  if(ignoreCatchupType != null && ignoreCatchupType.equalsIgnoreCase("ignore_fail"))
+                    throw new Exception(exception.getMessage)
                 }
               }
             }

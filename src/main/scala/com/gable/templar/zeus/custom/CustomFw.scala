@@ -240,6 +240,20 @@ trait CustomFw {
     correctFormat == ictrlDtTgtFmt
   }
 
+  def checkFrequencyAndChangeFrequencyToCorrectFrequency(frequency: String,ictrlDtFmt: String): String = {
+    ictrlDtFmt match {
+      case "yyyyMMdd" => {
+        return "daily"
+      }
+      case "yyyyMM" => {
+        return "monthly"
+      }
+      case "yyyyMMddHH" => {
+        return "hourly"
+      }
+    }
+  }
+
 
   def doRunTaskGroup(dependencyCheckModel: DependencyCheckModel, jobType: List[JOB_TYPE]): util.ArrayList[ExecuteResponse] = {
     taskExecutor match {
