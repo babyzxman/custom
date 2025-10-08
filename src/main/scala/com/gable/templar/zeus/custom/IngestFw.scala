@@ -695,8 +695,18 @@ class IngestFw(override val schemaName: String,
                       roundTime,postgresConnectionInfo,exception.getMessage,
                       "tbl_ingest_audit_logs",jobName,refDateIctrlDt)
                   }
-                  if(ignoreCatchupType != null && ignoreCatchupType.equalsIgnoreCase("ignore_fail"))
+                  if(exception.getClass.equals(classOf[RunNotebookParallelException]) &&
+                    ignoreCatchupType != null && ignoreCatchupType.equalsIgnoreCase("ignore_fail")) {
+                    if (catchUpType.equalsIgnoreCase(CATCHUP_TYPE.SEQUENCE.getValue)) {
+                      currentLocalDateRun = addDateByFrequency(currentLocalDateRun, frequency)
+                      if (currentLocalDateRun.isAfter(masterRefDate)) {
+                        isContinueRunning = false
+                      }
+                    }
+                  }
+                  else {
                     throw new Exception(exception.getMessage)
+                  }
                 }
               }
             }
