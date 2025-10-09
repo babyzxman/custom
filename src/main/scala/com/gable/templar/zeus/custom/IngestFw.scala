@@ -324,9 +324,9 @@ class IngestFw(override val schemaName: String,
 
           val queryDeleteLog =
             s"""
-      DELETE FROM $ingestAuditLogsTable
-      WHERE job_nm = '$jobNmUpdate' AND tasksgroup_nm = '$tasksgroupNmUpdate' AND round_time = '$roundTime' AND dag_run_id = '$dagRunId'
-      """
+          DELETE FROM $ingestAuditLogsTable
+          WHERE job_nm = '$jobNmUpdate' AND tasksgroup_nm = '$tasksgroupNmUpdate' AND round_time = '$roundTime' AND dag_run_id = '$dagRunId' AND ictrl_dt = '$ictrlDtUpdate'
+          """
           ConnectionService.postgresqlInsertUpdateFunc(
             connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
             connectionInfo.getUserNm, connectionInfo.getPassword, queryDeleteLog
