@@ -97,7 +97,7 @@ class IngestFw(override val schemaName: String,
           prerequisiteSchemaNm = resultSet.getString("prerequisite_schema_nm"),
           prerequisiteJobNm = resultSet.getString("prerequisite_job_nm"),
           value = resultSet.getString("value"),
-          emptyFlag = resultSet.getInt("empty_flag"),
+          emptyFlag = Try(resultSet.getObject("empty_flag").toString.toInt).getOrElse(0),
           dataColumn = resultSet.getString("data_column"),
           ictrlDtTgtfmt = resultSet.getString("ictrl_dt_tgtfmt")
         )
@@ -1193,6 +1193,46 @@ class IngestFw(override val schemaName: String,
               (false, Map(prerequisiteJobNameStr -> findMiss.toList))
             }
           }
+
+        case "weekly" | "cur_month" | "prev_month" | "eom" | "day-n"  => {
+          val valuesInt = values.map(_.toInt).getOrElse(0)
+          val targetDate = frequencyCheck match {
+            case "weekly" =>
+              // Value is on day of week Sunday = 0, Monday = 1, ..., Saturday = 6
+              val dayOfWeek = masterRefDate.getDayOfWeek.getValue % 7 // Monday = 1 (1-7), so %7 makes Sunday = 0, Mon = 1 ... Sat = 6
+              val dayReturn = (dayOfWeek + (7 - valuesInt)) % 7 // Ensure positive days to subtract to reach target weekday
+              masterRefDate.minusDays(dayReturn)
+            case "cur_month" =>
+              masterRefDate.withDayOfMonth(valuesInt)
+            case "prev_month" =>
+              masterRefDate.minusMonths(1).withDayOfMonth(valuesInt)
+            case "eom" =>
+              masterRefDate.withDayOfMonth(1).minusDays(1) // Last day of previous month
+            case "day-n" =>
+              masterRefDate.minusDays(valuesInt)
+          }
+          val query = s"$baseQuery and ictrl_dt = $targetDate order by job_start_time desc"
+          val listDateTarget = List(targetDate.format(DateTimeFormatter.ofPattern(patternIctrlDtCheck)))
+          if (checkInDate == "logs") {
+            val records = ConnectionService.postgresqlQueryDirectly(postgresConnectionInfo.getIp, postgresConnectionInfo.getPort,
+              postgresConnectionInfo.getDbName, postgresConnectionInfo.getUserNm,
+              postgresConnectionInfo.getPassword, query)
+            try {
+              checkExistsDataWithOutCheckMiss(records.rs,listDateTarget.head,prerequisiteJobNameStr,emptyFlag,prerequisiteTableCleaned)
+            }
+            finally {
+              records.close()
+            }
+          } else {
+            val result = checkBusinessColumn(frequencyCheck, businessColumn, prerequisiteSchema, prerequisiteTableCleaned, listDateTarget.head, sparkSession)
+            if (result.isEmpty) {
+              queryOracle(prerequisiteJobNameStr, patternIctrlDtCheck, prerequisiteTableCleaned, prerequisiteSchema, listDateTarget.head, depenIp, depenPort, depenUserNm, depenPassword, depenSid, prerequisiteTable)
+            }
+            else {
+              (true, Map(prerequisiteJobNameStr -> List()))
+            }
+          }
+        }
 
         case "every_n_hour" =>
           val dateRun = masterRefDate
