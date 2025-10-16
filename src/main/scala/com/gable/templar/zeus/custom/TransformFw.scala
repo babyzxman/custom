@@ -1152,7 +1152,7 @@ class TransformFw(override val schemaName: String,
               targetDateQueryPart = s"IN (${listDateTarget.map(d => s"'$d'").mkString(", ")})"
             }
           case "start_month_to_current" =>
-            val startMonth = masterRefDate.withDayOfMonth(1)
+            val startMonth = masterRefDate.withDayOfMonth(1).withHour(0)
             val currentMonth = masterRefDate
             val format = DateTimeFormatter.ofPattern(patternIctrlDateCheck)
             var startMonthTemp = startMonth

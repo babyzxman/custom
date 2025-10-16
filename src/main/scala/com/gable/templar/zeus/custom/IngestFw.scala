@@ -1135,7 +1135,7 @@ class IngestFw(override val schemaName: String,
           }
 
         case "hourly" =>
-          val hoursOffset = values.map(_.toInt).getOrElse(0)
+          val hoursOffset = Try(values.get.toInt).getOrElse(0) // Safe conversion
           val targetDateTime = masterRefDate.minus(hoursOffset, ChronoUnit.HOURS)
           val targetDate = targetDateTime.format(DateTimeFormatter.ofPattern(patternIctrlDtCheck))
           val query = s"$baseQuery and ictrl_dt like '$targetDate%' order by job_start_time desc"
@@ -1205,7 +1205,7 @@ class IngestFw(override val schemaName: String,
           }
 
         case "weekly" | "cur_month" | "prev_month" | "eom" | "day-n"  => {
-          val valuesInt = values.map(_.toInt).getOrElse(0)
+          val valuesInt = Try(values.get.toInt).getOrElse(0)
           val targetDate = frequencyCheck match {
             case "weekly" =>
               // Value is on day of week Sunday = 0, Monday = 1, ..., Saturday = 6
@@ -1279,7 +1279,7 @@ class IngestFw(override val schemaName: String,
               println("Table is no record.")
               (false, Map(prerequisiteJobNameStr -> listDateTarget))
             } else {
-              val logRequire = 24 / values.map(_.toInt).getOrElse(1)
+              val logRequire = 24 / Try(values.get.toInt).getOrElse(1)
               val listLogDate = records.map(_.getString(0)).toList
               val findMiss = listDateTarget.toSet -- listLogDate.toSet
               val numberOfMiss = 24 - logRequire
