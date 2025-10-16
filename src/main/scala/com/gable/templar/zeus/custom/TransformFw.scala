@@ -1091,8 +1091,8 @@ class TransformFw(override val schemaName: String,
           (false, Map(prerequisiteJobNm -> listDateTarget))
         }
 
-      case "quarter" | "month_to_date" | "hour_to_date" | "daily_period" | "year_to_date" | "current_quarter" | "start_to_eom" |
-           "start_year_to_current" | "start_month_to_current" =>
+      case "quarter" | "month_to_date" | "hour_to_date" | "daily_period" | "year_to_date" | "current_quarter" | "start_month_to_eom" |
+           "start_year_to_current" | "start_month_to_current" | "prev_month_to_eom" =>
         val queryDictMultiDay = Map(
           "tbl_ingest_audit_logs" -> s"SELECT target_table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblIngestAuditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND target_schema_nm = '{{prerequisite_schema}}' AND target_table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC",
           "tbl_trans_audit_logs" -> s"SELECT table_nm, job_start_time, ictrl_dt, status, row_cnt FROM $tblTauditLogs WHERE upper(job_nm) = upper('{{prerequisite_job_nm}}') AND schema_nm = '{{prerequisite_schema}}' AND table_nm = '{{prerequisite_table}}' AND ictrl_dt {{target_date}} ORDER BY job_start_time DESC"
@@ -1100,6 +1100,23 @@ class TransformFw(override val schemaName: String,
         baseQuery = queryDictMultiDay.getOrElse(logTable, throw new InvalidArgumentException(s"Unknown log table type: $logTable"))
 
         frequencyCheck match {
+          case "prev_month_to_eom" =>
+            val startMonth = masterRefDate.withDayOfMonth(1).withHour(0)
+            val endMonth = startMonth.withDayOfMonth(startMonth.toLocalDate.lengthOfMonth()).withHour(23)
+            val format = DateTimeFormatter.ofPattern(patternIctrlDateCheck)
+            var startMonthTemp = startMonth
+            while(!startMonthTemp.isAfter(endMonth)) {
+              listDateTarget = listDateTarget :+ startMonthTemp.format(format)
+              startMonthTemp = addDateByFrequency(startMonthTemp,frequency)
+            }
+            listDateTarget = listDateTarget.distinct // Drop duplicates
+
+            val useBetweenQuery = checkOrderDatetimeFormat(patternIctrlDateCheck)
+            if (useBetweenQuery) {
+              targetDateQueryPart = s"BETWEEN '${startMonth.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}' AND '${endMonth.format(DateTimeFormatter.ofPattern(patternIctrlDateCheck))}'"
+            } else {
+              targetDateQueryPart = s"IN (${listDateTarget.map(d => s"'$d'").mkString(", ")})"
+            }
           case "start_month_to_eom" =>
             val startMonth = masterRefDate.withDayOfMonth(1).withHour(0)
             val endMonth = masterRefDate.withDayOfMonth(masterRefDate.toLocalDate.lengthOfMonth()).withHour(23)
