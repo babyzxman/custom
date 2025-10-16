@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.gable.templar.constant.JobConstant
 import com.gable.templar.constant.JobConstant.{CATCHUP_TYPE, JOB_TYPE, LOAD_TYPE, SCHEMA_LIST}
 import com.gable.templar.custom.view.{DependencyCheckModel, ExecuteResponse, RunNotebookParallelResult, RunParallelResult}
-import com.gable.templar.exception.RunNotebookParallelException
+import com.gable.templar.exception.{DropSuccessJobError, RunNotebookParallelException}
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.zeus.SparkServer
 import com.gable.templar.zeus.controller.model.LoginUser
@@ -792,6 +792,15 @@ class TransformFw(override val schemaName: String,
                 }
                 throw new Exception(exception.getMessage)
               }
+              case dropSuccessJobError: DropSuccessJobError => {
+                logger.error(dropSuccessJobError.getMessage, dropSuccessJobError)
+                updateStateOfAuditLogByJobNameAndRoundTimeAndDagRun(
+                  "FAILED",
+                  dependencyCheckModel, runId, LocalDateTime.now(),
+                  roundTime, connectionInfo, dropSuccessJobError.getMessage, "tbl_trans_audit_logs",
+                  jobName,refDateIctrlDt)
+                throw new DropSuccessJobError(dropSuccessJobError.getMessage)
+              }
             }
           }
         }
@@ -896,7 +905,7 @@ class TransformFw(override val schemaName: String,
       try {
         breakable {
           while (dfResultLog.rs.next()) {
-            throw new InvalidArgumentException(s"DropDuplicatesJobError: $jobName")
+            throw new DropSuccessJobError(s"DropDuplicatesJobError: $jobName")
           }
         }
       }

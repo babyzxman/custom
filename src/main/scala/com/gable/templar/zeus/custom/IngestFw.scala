@@ -686,6 +686,16 @@ class IngestFw(override val schemaName: String,
                 }
               }
               catch {
+                case dropSuccessJobError: DropSuccessJobError => {
+                  logger.info("drop success job error")
+                  logger.error(dropSuccessJobError.getMessage,dropSuccessJobError)
+                  updateStateOfAuditLogByJobNameAndRoundTimeAndDagRun(
+                    "FAILED",
+                    dependencyCheckModel,runId,LocalDateTime.now(),
+                    roundTime,postgresConnectionInfo,dropSuccessJobError.getMessage,
+                    "tbl_ingest_audit_logs",jobName,refDateIctrlDt)
+                  throw new DropSuccessJobError(dropSuccessJobError.getMessage)
+                }
                 case exception: Exception => {
                   logger.error(exception.getMessage,exception)
                   if(!exception.getClass.equals(classOf[RunNotebookParallelException])) {

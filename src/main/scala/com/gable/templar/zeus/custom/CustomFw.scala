@@ -5,7 +5,7 @@ import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.gable.templar.constant.JobConstant
 import com.gable.templar.constant.JobConstant.{JOB_TYPE, importParameter, initialTitle, manualTitle}
 import com.gable.templar.custom.view.{AirflowModelView, DependencyCheckModel, ExecuteResponse, NotebookCheckParallelRequest, NotebookIdAddParameterRequest, NotebookRunParallelRequest, NotebookRunParallelResponse, RunNotebookParallelResult, SequenceJobInformation}
-import com.gable.templar.exception.{DropDuplicatesJobError, DropSuccessJobError}
+import com.gable.templar.exception.{DropDuplicatesJobError, DropSuccessJobError, RunNotebookParallelException}
 import com.gable.templar.heaven.exception.InvalidArgumentException
 import com.gable.templar.heaven.util.{HTTPServletRequestUtil, RestTemplateFactoryUtil}
 import com.gable.templar.zeus.controller.model.LoginUser
@@ -318,7 +318,10 @@ trait CustomFw {
           cf.whenComplete((_, _) => limiter.release())
             .whenComplete((res, err) => {
               if (err != null) {
-                isFailed = true
+                if(!err.getCause.getClass.equals(classOf[DropSuccessJobError])) {
+                  isFailed = true
+                }
+                executeResponse.setMessage(err.getMessage)
                 errorMsg.append(err.getMessage)
               }
             })
@@ -331,8 +334,6 @@ trait CustomFw {
         }
         catch {
           case exception: Exception => {
-            logger.error(exception.getMessage, exception)
-            isFailed = true
           }
         }
       })
@@ -360,11 +361,27 @@ trait CustomFw {
       finally{
         taskGroupConnection.close()
       }
-      executeResult.add(CompletableFuture.completedFuture(
-        doRunFramework(dependencyCheckModel, jobType.head,
-          row.getAs[String]("job_nm"), row, tblConfName.head,
-          httpServletRequest, loginUser.getUsername,roundTime)).get().get())
-      executeResult
+      try {
+        executeResult.add(CompletableFuture.completedFuture(
+          doRunFramework(dependencyCheckModel, jobType.head,
+            row.getAs[String]("job_nm"), row, tblConfName.head,
+            httpServletRequest, loginUser.getUsername, roundTime)).get().get())
+        executeResult
+      }
+      catch {
+        case exception: Exception => {
+          logger.info("exception class = {}",exception.getClass)
+          if(!exception.getCause.getClass.equals(classOf[DropSuccessJobError])) {
+            throw new Exception(exception.getMessage)
+          }
+          else {
+            val executeResponse = new ExecuteResponse
+            executeResponse.setMessage(exception.getMessage)
+            executeResult.add(executeResponse)
+            executeResult
+          }
+        }
+      }
     }
   }
 
