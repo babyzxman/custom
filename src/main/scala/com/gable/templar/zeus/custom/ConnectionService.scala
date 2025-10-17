@@ -125,7 +125,7 @@ object ConnectionService {
     val connection = DriverManager.getConnection(url, username, password)
     val statement = connection.prepareStatement(query)
     try{
-      val rs = statement.executeQuery(query)
+      val rs = statement.executeQuery()
       while(rs.next()) {
         if(rs.getString("active_flag") != null && rs.getString("active_flag") == "Y")
           globalParamMap.put(rs.getString("key"),rs.getString("value"))
