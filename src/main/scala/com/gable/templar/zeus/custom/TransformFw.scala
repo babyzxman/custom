@@ -209,7 +209,7 @@ class TransformFw(override val schemaName: String,
     updateJobStartTimeOfAuditLogByJobNameAndRoundTimeAndDagRun(
       jobName,jobStartTime,roundTime,runId,
       "tbl_ingest_audit_logs",connectionInfo,refDateIctrlDt)
-    doRunNotebookParallel(param,
+    doRunNotebookParallelRunWithName(param,
         controlJobDf.getAs[String]("script_path").trim, dependencyCheckModel,
         username, runId,httpServletRequest)
   }
