@@ -426,6 +426,8 @@ trait CustomFw {
                             runId: String, httpServletRequest: HttpServletRequest): RunNotebookParallelResult = {
     val runNotebookParallelResult = new RunNotebookParallelResult
     param.put("dag_run_id", objectMapper.valueToTree(runId))
+    if(dependencyCheckModel.getWorkspaceName != null)
+      param.put("workspace_name",objectMapper.valueToTree(dependencyCheckModel.getWorkspaceName))
     val token = HTTPServletRequestUtil.getToken(httpServletRequest)
     val notebookRunParallelRequest = new NotebookRunParallelRequest
     notebookRunParallelRequest.setRunBy(username)

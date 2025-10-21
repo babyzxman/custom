@@ -198,10 +198,26 @@ class TransformFw(override val schemaName: String,
     param.put("back_date", objectMapper.valueToTree(0))
     param.put("job_name", objectMapper.valueToTree(jobName))
     param.put("spec_arg", objectMapper.valueToTree(specArg))
-    val globalParamMap = ConnectionService.getGlobalParams(
+    var globalParamMap = ConnectionService.getGlobalParams(
       connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
       connectionInfo.getUserNm,connectionInfo.getPassword,
-      s"select * from $schemaName.tbl_global_params where system = 'schema'")
+      s"select * from $schemaName.tbl_global_params where system = 'schema' and work_space is null and notebook_id is null")
+    for(schemaEntry <- globalParamMap.entrySet()) {
+      param.put(schemaEntry.getKey,objectMapper.valueToTree(schemaEntry.getValue))
+    }
+    if(dependencyCheckModel.getWorkspaceName != null) {
+      globalParamMap = ConnectionService.getGlobalParams(
+        connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+        connectionInfo.getUserNm, connectionInfo.getPassword,
+        s"select * from $schemaName.tbl_global_params where system = 'schema' and work_space = '${dependencyCheckModel.getWorkspaceName}'")
+      for(schemaEntry <- globalParamMap.entrySet()) {
+        param.put(schemaEntry.getKey,objectMapper.valueToTree(schemaEntry.getValue))
+      }
+    }
+    globalParamMap = ConnectionService.getGlobalParams(
+      connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+      connectionInfo.getUserNm, connectionInfo.getPassword,
+      s"select * from $schemaName.tbl_global_params where system = 'schema' and notebook_name = '${controlJobDf.getAs[String]("script_path").trim}'")
     for(schemaEntry <- globalParamMap.entrySet()) {
       param.put(schemaEntry.getKey,objectMapper.valueToTree(schemaEntry.getValue))
     }
