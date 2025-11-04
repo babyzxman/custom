@@ -506,7 +506,6 @@ class TransformFw(override val schemaName: String,
             currentLocalDateRun = masterRefDate
           }
         }
-        val startIctrlDt = currentLocalDateRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
         val sb = new StringBuilder()
         var isContinueRunning: Boolean = true
         var ictrlDtRun: LocalDateTime = null
@@ -547,6 +546,8 @@ class TransformFw(override val schemaName: String,
             }
             val refDateIctrlDt = ictrlDtRun.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
             val runTime: LocalDateTime = LocalDateTime.now()
+            val startIctrlDt = calOverLap(currentLocalDateRun,overlapTime,frequency).format(
+              DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
             insertRoundAuditLog(dependencyCheckModel,
               schemaNameFromTbl, tableName,
               runId, refDateIctrlDt, connectionInfo, runTime,
@@ -834,7 +835,7 @@ class TransformFw(override val schemaName: String,
                           roundTime: LocalDateTime,jobName: String,
                           loadType:String,taskGroupNm:String): Unit = {
     val seqValue = Seq(jobName,roundTime,runId,
-      schemaName,tableName,jobStartTime,ictrlDt,startIctrlDt,endIctrlDt,
+      schemaName,tableName,jobStartTime,ictrlDt,startIctrlDt,ictrlDt,
       dependencyCheckModel.getModuleNotebookName,loadType,taskGroupNm)
     val sql = f"insert into ${this.schemaName}.tbl_trans_audit_logs (job_nm,round_time," +
       f"dag_run_id,schema_nm,table_nm,job_start_time,ictrl_dt,start_ictrl_dt," +
