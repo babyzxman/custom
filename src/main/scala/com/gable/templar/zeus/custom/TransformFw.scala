@@ -468,8 +468,8 @@ class TransformFw(override val schemaName: String,
         val timeRetry = controlJobDf.getAs[Int]("time_retry")
         val totalRetry = controlJobDf.getAs[Int]("total_retry")
         var currentDateRun = controlJobDf.getAs[String]("last_success_ictrl_dt")
-        val scheduleCutOff = if(controlJobDf.getAs[String]("time_cutoff") != null) {
-          LocalTime.parse(controlJobDf.getAs[String]("time_cutoff"),DateTimeFormatter.ofPattern("HH:mm"))
+        val scheduleCutOff = if(controlJobDf.getAs[String]("retry_timeout") != null) {
+          LocalTime.parse(controlJobDf.getAs[String]("retry_timeout"),DateTimeFormatter.ofPattern("HH:mm"))
         }
         else {
           null

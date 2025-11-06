@@ -16,7 +16,7 @@ import org.springframework.core.task.TaskExecutor
 import java.sql.{ResultSet, Timestamp}
 import scala.collection.JavaConversions._
 import java.text.SimpleDateFormat
-import java.time.{Duration, LocalDate, LocalDateTime}
+import java.time.{Duration, LocalDate, LocalDateTime, LocalTime}
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.{Callable, CompletableFuture, Future}
@@ -431,6 +431,12 @@ class IngestFw(override val schemaName: String,
           val ignoreCatchupType = controlJobDf.getAs[String]("catchup_type")
           val isSkipCatchUp = ignoreCatchupType != null && ignoreCatchupType == "ignore_catchup"
           var origRefDate: LocalDateTime = null
+          val scheduleCutOff = if(controlJobDf.getAs[String]("retry_timeout") != null) {
+            LocalTime.parse(controlJobDf.getAs[String]("retry_timeout"),DateTimeFormatter.ofPattern("HH:mm"))
+          }
+          else {
+            null
+          }
           if (dependencyCheckModel.getFixedDate == null || dependencyCheckModel.getFixedDate.isEmpty) {
             masterRefDate = minusDateByFrequency(
               dependencyCheckModel.get_bldEndDate().toLocalDateTime,
@@ -574,6 +580,11 @@ class IngestFw(override val schemaName: String,
                       readyJob.add(result.getKey)
                     }
                     if (hasNotReadyJob) {
+                      if(scheduleCutOff != null) {
+                        if(LocalTime.now().isAfter(scheduleCutOff)) {
+                          throw new InvalidArgumentException("The time retry is more than schedule cutoff time")
+                        }
+                      }
                       if (i == totalRetry - 1) {
                         val throwSb: StringBuilder = new StringBuilder()
                         throwSb.append("The dependency job check failed because ")
