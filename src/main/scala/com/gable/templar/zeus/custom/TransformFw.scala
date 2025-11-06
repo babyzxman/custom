@@ -109,16 +109,44 @@ class TransformFw(override val schemaName: String,
     val minutes = duration.minusHours(hours).toMinutes
     val seconds = duration.minusHours(hours).minusMinutes(minutes).getSeconds
     val durationString = f"$hours%02d:$minutes%02d:$seconds%02d"
-    val params = Seq(status, errorMsg, rowCount,
-      objectMapper.writeValueAsString(runParallelResult),
-      durationString,jobEndTime,jobEndTime, jobName, runId, ictrlDt, refDate)
-    val sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
-      f"err_msg = ?, row_cnt = ?, log_url = ?, duration = ?,job_end_time = ?,custom_end_time = ? " +
-      f"where job_nm = ? and dag_run_id = ? and ictrl_dt = ? " +
-      f"and round_time = ?"
-    ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,
+    val queryErrorMsgSql = f"select * from ${this.schemaName}.$tblLogName where job_nm = $jobName " +
+      f"and dag_run_id = $runId and ictrl_dt = $ictrlDt and round_time = $refDate"
+    val result = ConnectionService.postgresqlQueryDirectly(connectionInfo.getIp,
       connectionInfo.getPort, connectionInfo.getDbName,
-      connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
+      connectionInfo.getUserNm, connectionInfo.getPassword, queryErrorMsgSql)
+    var hasErrorMsg: Boolean = false
+    breakable {
+      while (result.rs.next()) {
+        if (result.rs.getString("err_msg") != null) {
+          hasErrorMsg = true
+          break
+        }
+      }
+    }
+    if(hasErrorMsg) {
+      val params = Seq(status, rowCount,
+        objectMapper.writeValueAsString(runParallelResult),
+        durationString,jobEndTime,jobEndTime, jobName, runId, ictrlDt, refDate)
+      val sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
+        f"row_cnt = ?, log_url = ?, duration = ?,job_end_time = ?,custom_end_time = ? " +
+        f"where job_nm = ? and dag_run_id = ? and ictrl_dt = ? " +
+        f"and round_time = ?"
+      ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,
+        connectionInfo.getPort, connectionInfo.getDbName,
+        connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
+    }
+    else {
+      val params = Seq(status, errorMsg, rowCount,
+        objectMapper.writeValueAsString(runParallelResult),
+        durationString,jobEndTime,jobEndTime, jobName, runId, ictrlDt, refDate)
+      val sql = f"update ${this.schemaName}.$tblLogName set status = ?, " +
+        f"err_msg = ?, row_cnt = ?, log_url = ?, duration = ?,job_end_time = ?,custom_end_time = ? " +
+        f"where job_nm = ? and dag_run_id = ? and ictrl_dt = ? " +
+        f"and round_time = ?"
+      ConnectionService.postgresqlInsertUpdateFunc(connectionInfo.getIp,
+        connectionInfo.getPort, connectionInfo.getDbName,
+        connectionInfo.getUserNm, connectionInfo.getPassword, sql, params)
+    }
     if (status.equals("SUCCEED") && (lastSuccessIctrlDt == null || lastSuccessIctrlDt.toInt < ictrlDt.toInt)) {
       val sql = s"update ${this.schemaName}.$tblConfName set last_success_ictrl_dt = '$ictrlDt' " +
         s"where job_nm = '${jobName}'"
@@ -179,7 +207,7 @@ class TransformFw(override val schemaName: String,
       "yyyy-MM-dd HH:mm:ss.SSSSSS")))
     specArg.add(masterRefDate.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS")))
     specArg.add(calOverLap(currentLocalDateRun,overlap,frequency).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS")))
-    specArg.add(masterRefDate.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS")))
+    specArg.add(addDateByFrequency(masterRefDate,frequency).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS")))
     if (controlJobDf.getAs[String]("specific_argument") != null) {
       val newArgs = controlJobDf.getAs[String]("specific_argument").replace("'", "\"")
       val specificArg = scalaObjectMapper.readValue(
@@ -1041,7 +1069,7 @@ class TransformFw(override val schemaName: String,
     val valuesInt = Try(values.toString.toInt).getOrElse(0) // Safe conversion
 
     frequencyCheck match {
-      case "daily" | "weekly" | "cur_month" | "prev_month" | "eom" | "day-n" | "hourly" =>
+      case "daily" | "weekly" | "cur_month" | "prev_month" | "eom" | "day-n" | "hourly" | "eom_curr" =>
         var targetDateAsDateTime: LocalDateTime = masterRefDate
 
         frequencyCheck match {
@@ -1060,6 +1088,9 @@ class TransformFw(override val schemaName: String,
             targetDateAsDateTime = masterRefDate.minusDays(valuesInt)
           case "hourly" =>
             targetDateAsDateTime = masterRefDate.minusHours(valuesInt)
+          case "eom_curr" =>
+            targetDateAsDateTime = masterRefDate.withDayOfMonth(
+              masterRefDate.toLocalDate.lengthOfMonth())
           case _ => // "daily" case
             targetDateAsDateTime = masterRefDate
         }
