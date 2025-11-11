@@ -435,6 +435,7 @@ trait CustomFw {
     notebookRunParallelRequest.setRunningId(runId)
     notebookRunParallelRequest.setLanguage("python")
     notebookRunParallelRequest.setModuleNotebookName(dependencyCheckModel.getModuleNotebookName)
+    notebookRunParallelRequest.setWorkspaceName(dependencyCheckModel.getWorkspaceName)
     val notebookIdAddParameterRequest: NotebookIdAddParameterRequest = new NotebookIdAddParameterRequest
     val addParameterRequest: java.util.Map[String, java.util.Map[String, JsonNode]] = new java.util.HashMap[String, java.util.Map[String, JsonNode]]()
     addParameterRequest.put(initialTitle, param)
