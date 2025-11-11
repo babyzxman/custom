@@ -362,7 +362,8 @@ object DataValidator {
     // Rewrite of `update_condition_func`
     def updateConditionFunc(tmpValidationDF: DataFrame, targetTblName: String, uniqueKey: String,
                             updateColumn: List[String], updateCondition: Option[String],
-                            spark: SparkSession): Unit = {
+                            spark: SparkSession,
+                            partitionConditionList: List[PartitionCondition]): Unit = {
       val deltaTable = DeltaTable.forName(spark, targetTblName)
 
       val uniqueKeyList = if (uniqueKey.startsWith("[") && uniqueKey.endsWith("]")) {
@@ -373,9 +374,13 @@ object DataValidator {
 
       val joinCondition = uniqueKeyList.map(key => s"trg.$key = src.$key").mkString(" AND ")
       val updateSetClause = updateColumn.map(c => (c, col(s"src.$c"))).toMap
+      var fullMergeCondition = s"$joinCondition"
+      if(partitionConditionList.nonEmpty) {
+        fullMergeCondition = fullMergeCondition + s" AND (${generateWhereConditionFromDeletePartition(partitionConditionList,"trg")})"
+      }
 
       deltaTable.as("trg")
-        .merge(tmpValidationDF.as("src"), joinCondition)
+        .merge(tmpValidationDF.as("src"), fullMergeCondition)
         .whenMatched(updateCondition.getOrElse("true"))
         .update(updateSetClause)
         .execute()
@@ -438,7 +443,7 @@ object DataValidator {
           uniqueKey = uniqueKey,
           updateColumn = updateColumn,
           updateCondition = updateCondition,
-          spark
+          spark,partitionConditionList
         )
 
       case _ =>

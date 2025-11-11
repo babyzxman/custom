@@ -229,26 +229,26 @@ class TransformFw(override val schemaName: String,
     var globalParamMap = ConnectionService.getGlobalParams(
       connectionInfo.getIp,connectionInfo.getPort,connectionInfo.getDbName,
       connectionInfo.getUserNm,connectionInfo.getPassword,
-      s"select * from $schemaName.tbl_global_params where system = 'schema' and work_space is null and notebook_id is null")
+      s"select * from $schemaName.tbl_global_params where system = 'schema'")
     for(schemaEntry <- globalParamMap.entrySet()) {
       param.put(schemaEntry.getKey,objectMapper.valueToTree(schemaEntry.getValue))
     }
-    if(dependencyCheckModel.getWorkspaceName != null) {
-      globalParamMap = ConnectionService.getGlobalParams(
-        connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
-        connectionInfo.getUserNm, connectionInfo.getPassword,
-        s"select * from $schemaName.tbl_global_params where system = 'schema' and work_space = '${dependencyCheckModel.getWorkspaceName}'")
-      for(schemaEntry <- globalParamMap.entrySet()) {
-        param.put(schemaEntry.getKey,objectMapper.valueToTree(schemaEntry.getValue))
-      }
-    }
-    globalParamMap = ConnectionService.getGlobalParams(
-      connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
-      connectionInfo.getUserNm, connectionInfo.getPassword,
-      s"select * from $schemaName.tbl_global_params where system = 'schema' and notebook_name = '${controlJobDf.getAs[String]("script_path").trim}'")
-    for(schemaEntry <- globalParamMap.entrySet()) {
-      param.put(schemaEntry.getKey,objectMapper.valueToTree(schemaEntry.getValue))
-    }
+//    if(dependencyCheckModel.getWorkspaceName != null) {
+//      globalParamMap = ConnectionService.getGlobalParams(
+//        connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+//        connectionInfo.getUserNm, connectionInfo.getPassword,
+//        s"select * from $schemaName.tbl_global_params where system = 'schema' and work_space = '${dependencyCheckModel.getWorkspaceName}'")
+//      for(schemaEntry <- globalParamMap.entrySet()) {
+//        param.put(schemaEntry.getKey,objectMapper.valueToTree(schemaEntry.getValue))
+//      }
+//    }
+//    globalParamMap = ConnectionService.getGlobalParams(
+//      connectionInfo.getIp, connectionInfo.getPort, connectionInfo.getDbName,
+//      connectionInfo.getUserNm, connectionInfo.getPassword,
+//      s"select * from $schemaName.tbl_global_params where system = 'schema' and notebook_name = '${controlJobDf.getAs[String]("script_path").trim}'")
+//    for(schemaEntry <- globalParamMap.entrySet()) {
+//      param.put(schemaEntry.getKey,objectMapper.valueToTree(schemaEntry.getValue))
+//    }
     val jobStartTime: LocalDateTime = LocalDateTime.now()
     updateJobStartTimeOfAuditLogByJobNameAndRoundTimeAndDagRun(
       jobName,jobStartTime,roundTime,runId,
@@ -521,9 +521,9 @@ class TransformFw(override val schemaName: String,
           }
           processJobType = "manual"
         }
-        val isSkipCatchUp = (controlJobDf.getAs[String]("ignore_catchup") != null &&
-          controlJobDf.getAs[String]("ignore_catchup") == "Y")
-        if(currentDateRun == null || LOAD_TYPE.FULL_LOAD.getValue.equals(loadType) || isSkipCatchUp) {
+//        val isSkipCatchUp = (controlJobDf.getAs[String]("ignore_catchup") != null &&
+//          controlJobDf.getAs[String]("ignore_catchup") == "Y")
+        if(currentDateRun == null || LOAD_TYPE.FULL_LOAD.getValue.equals(loadType)) {
           currentLocalDateRun = masterRefDate
           currentDateRun = masterRefDate.format(DateTimeFormatter.ofPattern(dateFormatIctrlDtForTb))
         }
@@ -755,7 +755,7 @@ class TransformFw(override val schemaName: String,
                     controlJobDf.getAs[String]("table_nm"), "tmp_validation",
                     controlJobDf.getAs[String]("load_type"), partitionCol, controlJobDf.
                       getAs[String]("unique_key"),
-                    Some(controlJobDf.getAs[String]("update_condition")),
+                    Option(controlJobDf.getAs[String]("update_condition")),
                     jobName, connectionInfo, sparkSession, tmpzSchema,updateCondition,
                     whereCondition,location.toString,dropPartitionList,partitionConditionList)
                   logger.info("drop partition list = {}",dropPartitionList)

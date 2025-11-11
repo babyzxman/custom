@@ -5,14 +5,16 @@ import com.gable.templar.heaven.service.custom.DefaultCustomService;
 import com.gable.templar.zeus.SparkServer;
 import com.gable.templar.zeus.config.HeraConfig;
 import com.gable.templar.zeus.controller.model.LoginUser;
-import com.gable.templar.zeus.custom.*;
+import com.gable.templar.zeus.custom.GeneralService;
+import com.gable.templar.zeus.custom.IngestFw;
+import com.gable.templar.zeus.custom.TransformFw;
 import com.gable.templar.zeus.service.spark.SparkHiveMetaStoreService;
 import com.gable.templar.zeus.service.spark.TableManageService;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import javax.annotation.PostConstruct;
 
-public class DependencyCheckCustom extends DefaultCustomService<DependencyCheckModel> {
+public class DependencyCheckCustomProd extends DefaultCustomService<DependencyCheckModel> {
 
     @Autowired
     private LoginUser loginUser;
@@ -32,10 +34,10 @@ public class DependencyCheckCustom extends DefaultCustomService<DependencyCheckM
 
     @PostConstruct
     void init() {
-        transformFw = new TransformFw("fwconfz_uat",
+        transformFw = new TransformFw("fwconfz",
                 heraConfig.getHeraUrl(),loginUser, SparkServer.getZeusSession().session(),
                 NewThreadExecutor.threadExecutor,tableManageService,sparkHiveMetaStoreService);
-        ingestFw =  new IngestFw("fwconfz_uat",
+        ingestFw =  new IngestFw("fwconfz",
                 heraConfig.getHeraUrl(),loginUser, SparkServer.getZeusSession().session(),
                 NewThreadExecutor.threadExecutor);
     }
@@ -44,7 +46,7 @@ public class DependencyCheckCustom extends DefaultCustomService<DependencyCheckM
 
     @Override
     public Object execute(DependencyCheckModel params) throws Exception {
-        return generalService.doRunFrameWork(params,transformFw,ingestFw,"fwconfz_uat");
+        return generalService.doRunFrameWork(params,transformFw,ingestFw,"fwconfz");
     }
 
     @Override
